@@ -137,17 +137,27 @@ def find_3d_projection(projection_0, projection_1, projection_2, target):
         objective,
         bounds,
         args=(projection_0, projection_1, projection_2, target),
-        popsize=2,
+        popsize=5,
         recombination=0.1,
-        mutation=0.1,  # (0.0, 0.1),
+        mutation=(0.0, 0.3),
         integrality=[True] * S,
-        init=create_initial_population(shape, 20),
+        init=create_initial_population(shape, 100),
         vectorized=True,
         polish=False,
         disp=True,
-        strategy=strategy,
+        # strategy=strategy,
+        maxiter=10**4,
+        callback=callback,
     )
     return result
+
+
+def callback(intermediate_result):
+    """
+    A callback that stops the optimization when the loss is zero.
+    """
+    if intermediate_result.fun == 0:
+        raise StopIteration
 
 
 def _randtobest1(samples, mutation, population):
@@ -172,13 +182,14 @@ def strategy(candidate: int, population: np.ndarray, rng=None):
     It first generate a sample as in best1bin, then it decides which elements force to 0.
     """
     # TODO: these override the other mutation and recombination parameters
-    mutation = 0.2
-    recombination = 0.2
+    mutation = 0.1
+    recombination = 0.1
     parameter_count = population.shape[1]
 
     # best1bin
+    best = population[candidate]
     r0, r1 = rng.choice(population.shape[0], 2, replace=False)
-    bprime = population[candidate] + mutation * (population[r0] - population[r1])
+    bprime = best + mutation * (population[r0] - population[r1])
 
     # code for binomial crossover
     trial = np.copy(population[candidate])
@@ -192,13 +203,18 @@ def strategy(candidate: int, population: np.ndarray, rng=None):
     # TODO: we need to accept this as a parameter... for now, compute the cubic root
     S = round(np.power(parameter_count, 1 / 3))
     trial = trial.reshape((S, S, S))
+    best = best.reshape((S, S, S))
     for i in range(S):
         for j in range(S):
             non_zero = trial[i, j].nonzero()
-            if non_zero[0].size > 0:
-                idx = np.random.choice(non_zero[0])
+            if non_zero[0].size > 1:
+                errs = []
+                for idx in range(non_zero[0].size):
+                    errs.append(trial[i, :, idx].sum() + trial[:, j, idx].sum())
+                idx = np.argmin(errs)
                 trial[i, j] = 0
-                trial[i, j, idx] = 1
+                trial[i, j, non_zero[0][idx]] = 1
+
     return trial.reshape(-1)
 
 
