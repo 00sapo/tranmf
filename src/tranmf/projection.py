@@ -230,7 +230,7 @@ def generate_3D_matrix(shape, p):
     for i in range(shape[0]):
         for j in range(shape[1]):
             # with a probability of 0.5, we set the value to 1
-            if np.random.rand() > p:
+            if np.random.rand() < p:
                 # chose a random index to be 1 and the rest 0
                 idx = np.random.randint(0, shape[2])
                 x[i, j, idx] = 1
