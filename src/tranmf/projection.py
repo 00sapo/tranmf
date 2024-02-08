@@ -8,36 +8,32 @@ def objective(x, projection_0, projection_1, projection_2, target=None):
     Objective function for the projection optimization problem.
 
     It computes a loss given a candidate 3D matrix (`x`) and 3 2D projections
-    (one for each dimension: `projection_0`, `projection_1`, `projection_2`).
+    (one for each dimension).
 
     The candidate 3D matrix should satisfy the following constraints:
-        - `x.sum(axis=1) = projection_0`
-        - `x.sum(axis=2) = projection_1`
-        - `x.sum(axis=3) = projection_2`
+        - `x.sum(axis=1) = projections[0]`
+        - `x.sum(axis=2) = projections[1]`
+        - `x.sum(axis=3) = projections[2]`
     As such, the loss is computed as the sum of the absolute differences between
-    the x's projections and the target projections for each sample in the batch.
+    the x's projections and the provided projections for each sample in the batch.
 
     Parameters:
         x : np.ndarray
-            2D array of shape (len_candidate, num_candidates).
-        projection_0 : np.ndarray, optional
-            2D projection on axis 0.
-        projection_1 : np.ndarray, optional
-            2D projection on axis 1.
-        projection_2 : np.ndarray, optional
-            2D projection on axis 2.
+            3D array of shape (depth, height, width).
+        projections : list of np.ndarray
+            Three 2D projections, one for each dimension.
         target : np.ndarray, optional
             Target 3D matrix to compare with. If provided, the loss is computed
             as the sum of the absolute differences between the candidate and the
             target.
 
     Returns:
-        np.ndarray
-            1D array of losses of shape (len_candidate, )
+        float
+            Loss value.
     """
     # Ensure x is 2D
-    if x.ndim == 1:
-        x = x[..., np.newaxis]
+    # if x.ndim == 1:
+    #     x = x[..., np.newaxis]
 
     # Check if each sample in x is a binary matrix
     # if not np.all(np.logical_or(x == 0, x == 1)):
@@ -72,7 +68,7 @@ def objective(x, projection_0, projection_1, projection_2, target=None):
     x_proj_0 = x.sum(axis=0)
     x_proj_1 = x.sum(axis=1)
     x_proj_2 = x.sum(axis=2)
-    loss_0 = loss_1 = loss_2 = np.zeros(x.shape[3])
+    # loss_0 = loss_1 = loss_2 = np.zeros(x.shape[3])
     if projection_0 is not None:
         loss_0 = np.abs(projection_0 - x_proj_0).sum(axis=(0, 1))
     if projection_1 is not None:
@@ -81,30 +77,30 @@ def objective(x, projection_0, projection_1, projection_2, target=None):
         loss_2 = np.abs(projection_2 - x_proj_2).sum(axis=(0, 1))
     loss = loss_0 + loss_1 + loss_2
 
-    mlflow.log_metric("loss_0_mean", np.mean(loss_0))
-    mlflow.log_metric("loss_0_std", np.std(loss_0))
-    mlflow.log_metric("loss_0_max", np.max(loss_0))
-    mlflow.log_metric("loss_0_min", np.min(loss_0))
-    mlflow.log_metric("loss_1_mean", np.mean(loss_1))
-    mlflow.log_metric("loss_1_std", np.std(loss_1))
-    mlflow.log_metric("loss_1_max", np.max(loss_1))
-    mlflow.log_metric("loss_1_min", np.min(loss_1))
-    mlflow.log_metric("loss_2_mean", np.mean(loss_2))
-    mlflow.log_metric("loss_2_std", np.std(loss_2))
-    mlflow.log_metric("loss_2_max", np.max(loss_2))
-    mlflow.log_metric("loss_2_min", np.min(loss_2))
-
-    mlflow.log_metric("loss_mean", np.mean(loss))
-    mlflow.log_metric("loss_std", np.std(loss))
-    mlflow.log_metric("loss_max", np.max(loss))
+    # mlflow.log_metric("loss_0_mean", np.mean(loss_0))
+    # mlflow.log_metric("loss_0_std", np.std(loss_0))
+    # mlflow.log_metric("loss_0_max", np.max(loss_0))
+    # mlflow.log_metric("loss_0_min", np.min(loss_0))
+    # mlflow.log_metric("loss_1_mean", np.mean(loss_1))
+    # mlflow.log_metric("loss_1_std", np.std(loss_1))
+    # mlflow.log_metric("loss_1_max", np.max(loss_1))
+    # mlflow.log_metric("loss_1_min", np.min(loss_1))
+    # mlflow.log_metric("loss_2_mean", np.mean(loss_2))
+    # mlflow.log_metric("loss_2_std", np.std(loss_2))
+    # mlflow.log_metric("loss_2_max", np.max(loss_2))
+    # mlflow.log_metric("loss_2_min", np.min(loss_2))
+    #
+    # mlflow.log_metric("loss_mean", np.mean(loss))
+    # mlflow.log_metric("loss_std", np.std(loss))
+    # mlflow.log_metric("loss_max", np.max(loss))
     mlflow.log_metric("loss_min", np.min(loss))
-    mlflow.log_metric("real_loss_mean", np.mean(real_loss))
-    mlflow.log_metric("real_loss_std", np.std(real_loss))
-    mlflow.log_metric("real_loss_max", np.max(real_loss))
+    # mlflow.log_metric("real_loss_mean", np.mean(real_loss))
+    # mlflow.log_metric("real_loss_std", np.std(real_loss))
+    # mlflow.log_metric("real_loss_max", np.max(real_loss))
     mlflow.log_metric("real_loss_min", np.min(real_loss))
-
-    if x.shape[-1] == 1:
-        return loss[0]
+    #
+    # if x.shape[-1] == 1:
+    #     return loss[0]
     return loss
 
 
@@ -137,12 +133,13 @@ def find_3d_projection(projection_0, projection_1, projection_2, target):
         objective,
         bounds,
         args=(projection_0, projection_1, projection_2, target),
-        popsize=5,
+        popsize=1,
         recombination=0.1,
         mutation=(0.0, 0.3),
         integrality=[True] * S,
-        init=create_initial_population(shape, 100),
+        init=create_initial_population(shape, 10**4),
         vectorized=True,
+        # workers=16,
         polish=False,
         disp=True,
         # strategy=strategy,
@@ -188,24 +185,23 @@ def strategy(candidate: int, population: np.ndarray, rng=None):
 
     # best1bin
     best = population[candidate]
-    r0, r1 = rng.choice(population.shape[0], 2, replace=False)
+    r0, r1 = np.random.choice(population.shape[0], 2, replace=False)
     bprime = best + mutation * (population[r0] - population[r1])
 
     # code for binomial crossover
     trial = np.copy(population[candidate])
-    fill_point = rng.choice(parameter_count)
-    crossovers = rng.uniform(size=parameter_count)
+    fill_point = np.random.choice(parameter_count)
+    crossovers = np.random.uniform(size=parameter_count)
     crossovers = crossovers < recombination
     crossovers[fill_point] = True
     trial = np.where(crossovers, bprime, trial)
 
     # force the sum to 1 along axis 2
     # TODO: we need to accept this as a parameter... for now, compute the cubic root
-    S = round(np.power(parameter_count, 1 / 3))
-    trial = trial.reshape((S, S, S))
-    best = best.reshape((S, S, S))
-    for i in range(S):
-        for j in range(S):
+    trial = trial.reshape(SHAPE)
+    best = best.reshape(SHAPE)
+    for i in range(SHAPE[0]):
+        for j in range(SHAPE[1]):
             non_zero = trial[i, j].nonzero()
             if non_zero[0].size > 1:
                 errs = []
@@ -223,7 +219,7 @@ def create_initial_population(shape, popsize):
     for p in range(popsize):
         initial_population.append(generate_3D_matrix(shape, np.random.rand()))
 
-    initial_population = np.array(initial_population)
+    initial_population = np.array(initial_population, dtype=np.int8)
     initial_population = initial_population.reshape(popsize, -1)
     return initial_population
 
@@ -231,12 +227,12 @@ def create_initial_population(shape, popsize):
 def generate_3D_matrix(shape, p):
     x = np.zeros(shape)
     # the sum along axis 2 must always be 1
-    for i in range(S):
-        for j in range(S):
+    for i in range(shape[0]):
+        for j in range(shape[1]):
             # with a probability of 0.5, we set the value to 1
             if np.random.rand() > p:
                 # chose a random index to be 1 and the rest 0
-                idx = np.random.randint(0, S)
+                idx = np.random.randint(0, shape[2])
                 x[i, j, idx] = 1
     return x
 
@@ -245,8 +241,10 @@ if __name__ == "__main__":
     # Example usage
     import sys
 
-    S = int(sys.argv[1])
-    x = generate_3D_matrix((S, S, S), float(sys.argv[2]))
+    SHAPE = (20, 20, 100)
+    seed = int(sys.argv[2])
+    np.random.seed(seed)
+    x = generate_3D_matrix(SHAPE, float(sys.argv[1]))
     print("True solution:\n", x)
     print("True solution shape:", x.shape)
     projection_0 = x.sum(axis=0)
@@ -254,10 +252,9 @@ if __name__ == "__main__":
     projection_2 = x.sum(axis=2)
     with mlflow.start_run():
         result = find_3d_projection(projection_0, projection_1, projection_2, x)
-    proj3d = result.x.reshape(S, S, S)
+    proj3d = result.x.reshape(SHAPE)
     loss = result.fun
     print("----")
     print("Estimated solution:\n", proj3d)
     print("Estimated Loss:", loss)
     print("Real Loss:", np.abs(x - proj3d).sum())
-    __import__("ipdb").set_trace()
