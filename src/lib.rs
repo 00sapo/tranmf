@@ -1,8 +1,10 @@
 // import rand crate
 use genevo::{
-    operator::prelude::*, population::ValueEncodedGenomeBuilder, prelude::*, types::fmt::Display,
+    operator::prelude::*, mutation::value::RandomGenomeMutation, prelude::*, types::fmt::Display, operator::CrossoverOp, genetic::Parents
 };
-use rand::prelude::*;
+use ndarray::prelude::*;
+// import trait New
+
 
 #[derive(Debug)]
 struct Parameter {
@@ -10,7 +12,7 @@ struct Parameter {
     generation_limit: u64,
     num_individuals_per_parents: usize,
     selection_ratio: f64,
-    num_crossover_points: usize,
+    // num_crossover_points: usize,
     mutation_rate: f64,
     reinsertion_ratio: f64,
 }
@@ -18,43 +20,67 @@ struct Parameter {
 impl Default for Parameter {
     fn default() -> Self {
         Self {
-            population_size: 100,
-            generation_limit: 100,
+            population_size: 1000,
+            generation_limit: 100000,
             num_individuals_per_parents: 2,
             selection_ratio: 0.5,
-            num_crossover_points: 2,
-            mutation_rate: 0.01,
+            // num_crossover_points: 2,
+            mutation_rate: 0.1,
             reinsertion_ratio: 0.1,
         }
     }
 }
 
-/// The phenotype
-// type Phenotype = Vec<Vec<Vec<u8>>>;
 
 /// The genotype
-type Genome = Vec<Vec<Vec<u8>>>;
+#[derive(PartialEq, Clone, Debug)]
+struct Genome {
+    arr: Array3<bool>
+}
+
+impl Genome{
+    pub fn new(shape: &[usize]) -> Self {
+        Genome{arr: Array3::<bool>::default((shape[0], shape[1], shape[2]))}
+    }
+
+    pub fn project(&self, axis: usize) -> Array2<i32> {
+        // convert the bool array to an array of 1 and 0 of type i32
+        let arr = self.arr.mapv(|x| if x {1} else {0});
+        arr.sum_axis(Axis(axis))
+    }
+}
+
+
+impl Genotype for Genome {
+    type Dna = bool;
+}
+
+
 
 /// The fitness function for `Genome`s.
 #[derive(Clone, Debug)]
 struct FitnessCalc {
-    target_projections: (Vec<Vec<u8>>, Vec<Vec<u8>>, Vec<Vec<u8>>),
+    target_projections: (Array2<i32>, Array2<i32>, Array2<i32>),
     }
 
-impl FitnessFunction<Genome, usize> for FitnessCalc {
+impl FitnessFunction<Genome, usize> for FitnessCalc
+{
     fn fitness_of(&self, genome: &Genome) -> usize {
         // compute the projections of the genome
-        let proj_0 = compute_projection(genome, 0);
-        let proj_1 = compute_projection(genome, 1);
-        let proj_2 = compute_projection(genome, 2);
+        let proj_0 = genome.project(0);
+        let proj_1 = genome.project(1);
+        let proj_2 = genome.project(2);
 
-        // compare the projections with the target projections
-        // TODO: check what is going on here
-        self.target_projections.0.iter().zip(proj_0.iter())
-            .chain(self.target_projections.1.iter().zip(proj_1.iter()))
-            .chain(self.target_projections.2.iter().zip(proj_2.iter()))
-            .map(|(t, p)| t.iter().zip(p.iter()).map(|(t, p)| (t - p).pow(2)).sum::<u8>() as usize)
-            .sum()
+        // take the sum of the absolute differences
+        // between the projections and the target projections
+        let diff_0 = (proj_0 - &self.target_projections.0).mapv(|x| x.abs()).sum();
+        let diff_1 = (proj_1 - &self.target_projections.1).mapv(|x| x.abs()).sum();
+        let diff_2 = (proj_2 - &self.target_projections.2).mapv(|x| x.abs()).sum();
+        let diff = diff_0 as usize + diff_1 as usize + diff_2 as usize;
+
+        // subtract from the maximum and divide by the maximum
+        let max_diff = self.target_projections.0.len() + self.target_projections.1.len() + self.target_projections.2.len();
+        (max_diff - diff) / max_diff * 100
     }
 
     fn average(&self, fitness_values: &[usize]) -> usize {
@@ -62,7 +88,7 @@ impl FitnessFunction<Genome, usize> for FitnessCalc {
     }
 
     fn highest_possible_fitness(&self) -> usize {
-        100_00
+        100
     }
 
     fn lowest_possible_fitness(&self) -> usize {
@@ -71,37 +97,87 @@ impl FitnessFunction<Genome, usize> for FitnessCalc {
 }
 
 /// Generate a 3D matrix of a given shape and fill it with 1s with a given probability.
-fn generate_3D_matrix(shape: (usize, usize, usize), p: f64) -> Vec<Vec<Vec<u8>>> {
-    let mut x = vec![vec![vec![0; shape.2]; shape.1]; shape.0];
+fn generate_genome(shape: (usize, usize, usize), p: f64) -> Genome {
+    let mut x = Array3::<bool>::default(shape);
     for i in 0..shape.0 {
         for j in 0..shape.1 {
             if rand::random::<f64>() < p {
                 let idx = rand::random::<usize>() % shape.2;
-                x[i][j][idx] = 1;
+                x[[i, j, idx]] = true;
             }
         }
     }
-    x
+    Genome{arr: x}
 }
 
-/// A function to compute the projection of a 3D matrix along a given axis.
-fn compute_projection(x: &Vec<Vec<Vec<u8>>>, axis: i32) -> Vec<Vec<u8>> {
-    let mut projection = vec![vec![0; x[0].len()]; x.len()];
-    for i in 0..x.len() {
-        for j in 0..x[0].len() {
-            for k in 0..x[0][0].len() {
-                if axis == 2 {
-                    projection[i][j] += x[i][j][k];
-                } else if axis == 1 {
-                    projection[i][j] += x[i][k][j];
-                } else {
-                    projection[i][j] += x[k][i][j];
+impl RandomGenomeMutation for Genome {
+    type Dna = bool;
+    fn mutate_genome<R>(
+            genome: Self, 
+            mutation_rate: f64, 
+            _min_value: &<Self as Genotype>::Dna, 
+            _max_value: &<Self as Genotype>::Dna, 
+            _rng: &mut R
+        ) -> Self
+        where
+            R: Rng + Sized
+    {
+        let mut mutated_genome = genome.clone();
+        let shape = genome.arr.shape();
+        for i in 0..shape[0] {
+            for j in 0..shape[1] {
+                for k in 0..shape[2] {
+                    if rand::random::<f64>() < mutation_rate {
+                        mutated_genome.arr[[i, j, k]] = !mutated_genome.arr[[i, j, k]];
+                    }
                 }
             }
         }
+        mutated_genome
     }
-    projection
 }
+
+
+/// Custom genome builder
+struct MyGenomeBuilder
+    {
+    shape: (usize, usize, usize),
+        p: f64,
+    }
+
+impl GenomeBuilder<Genome> for MyGenomeBuilder {
+    fn build_genome<R>(&self, _: usize, _rng: &mut R) -> Genome
+        where
+            R: Rng + Sized {
+        generate_genome(self.shape, self.p)
+    }
+}
+
+impl CrossoverOp<Genome> for UniformCrossBreeder {
+        fn crossover<R>(&self, parents: Parents<Genome>, rng: &mut R) -> Vec<Genome>
+        where
+            R: Rng + Sized,
+        {
+            let genome_shape = parents[0].arr.shape();
+            let num_parents = parents.len();
+            // breed one child for each partner in parents
+            let mut children: Vec<Genome> = Vec::with_capacity(num_parents);
+            while num_parents > children.len() {
+                let mut genome = Genome::new(genome_shape);
+                // for each cell on the 2nd dimension (a column)
+                for i in 0..genome_shape[0] {
+                    for j in 0..genome_shape[1] {
+                        // pick the value of a randomly chosen parent
+                        let random = rng.gen_range(0..num_parents);
+                        let value = parents[random].arr.slice(s![i, j, ..]);
+                        genome.arr.slice_mut(s![i, j, ..]).assign(&value);
+                    }
+                }
+                children.push(genome);
+            }
+            children
+        }
+    }
 
 // Exported function for Python
 #[no_mangle]
@@ -109,10 +185,10 @@ pub extern "C" fn run_genetic_algorithm() {
 
     let shape = (20, 20, 100);
     let p = 0.8;
-    let x = generate_3D_matrix(shape, p);
-    let proj_0 = compute_projection(&x, 0); // copilot suggest using clone?
-    let proj_1 = compute_projection(&x, 1);
-    let proj_2 = compute_projection(&x, 2);
+    let x = generate_genome(shape, p);
+    let proj_0 = x.project(0);
+    let proj_1 = x.project(1);
+    let proj_2 = x.project(2);
     let fitness_calc = FitnessCalc {
         target_projections: (proj_0, proj_1, proj_2),
     };
@@ -120,23 +196,22 @@ pub extern "C" fn run_genetic_algorithm() {
     let params = Parameter::default();
 
     let initial_population: Population<Genome> = build_population()
-        // TODO: create cusom genome builder
-        .with_genome_builder(ValueEncodedGenomeBuilder::new("ciao ciao".len(), 32, 126))
+        .with_genome_builder(MyGenomeBuilder { shape, p })
         .of_size(params.population_size)
         .uniform_at_random();
 
     let mut projection_sim = simulate(
+        // TODO: find a good setup
         genetic_algorithm()
-            .with_evaluation(fitness_calc)
-            // TODO: find a good setup
+            .with_evaluation(fitness_calc.clone())
             .with_selection(MaximizeSelector::new(
                 params.selection_ratio,
                 params.num_individuals_per_parents,
             ))
-            .with_crossover(MultiPointCrossBreeder::new(params.num_crossover_points))
-            .with_mutation(RandomValueMutator::new(params.mutation_rate, 32, 126))
+            .with_crossover(UniformCrossBreeder::default())
+            .with_mutation(RandomValueMutator::new(params.mutation_rate, false, true))
             .with_reinsertion(ElitistReinserter::new(
-                fitness_calc,
+                fitness_calc.clone(),
                 true,
                 params.reinsertion_ratio,
             ))
@@ -166,9 +241,6 @@ pub extern "C" fn run_genetic_algorithm() {
                     step.duration.fmt(),
                     step.processing_time.fmt()
                 );
-                println!("      {}", best_solution.solution.genome.as_text());
-                //                println!("| population: [{}]", result.population.iter().map(|g| g.as_text())
-                //                    .collect::<Vec<String>>().join("], ["));
             },
             Ok(SimResult::Final(step, processing_time, duration, stop_reason)) => {
                 let best_solution = step.result.best_solution;
@@ -182,7 +254,6 @@ pub extern "C" fn run_genetic_algorithm() {
                     best_solution.generation,
                     processing_time.fmt()
                 );
-                println!("      {}", best_solution.solution.genome.as_text());
                 break;
             },
             Err(error) => {

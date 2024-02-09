@@ -7,10 +7,10 @@ edition = "2021"
 
 [dependencies]
 genevo = ">=0.7.1"
-rand = ">=0.8.4"
+ndarray = ">=0.15.6"
+rand = ">=0.8.5"
 
 [lib]
 name = "tranmf"
 path = "src/lib.rs"
 crate-type = ["cdylib"]
-
