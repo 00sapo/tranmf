@@ -3,7 +3,8 @@ use genevo::{
     operator::prelude::*, mutation::value::RandomGenomeMutation, prelude::*, types::fmt::Display, operator::CrossoverOp, genetic::Parents
 };
 use ndarray::prelude::*;
-// import trait New
+// impor ttrait Sub
+use std::ops::Sub;
 
 
 #[derive(Debug)]
@@ -21,12 +22,12 @@ impl Default for Parameter {
     fn default() -> Self {
         Self {
             population_size: 1000,
-            generation_limit: 100000,
-            num_individuals_per_parents: 2,
+            generation_limit: 1000,
+            num_individuals_per_parents: 100,
             selection_ratio: 0.5,
             // num_crossover_points: 2,
-            mutation_rate: 0.1,
-            reinsertion_ratio: 0.1,
+            mutation_rate: 0.01,
+            reinsertion_ratio: 0.3,
         }
     }
 }
@@ -45,7 +46,7 @@ impl Genome{
 
     pub fn project(&self, axis: usize) -> Array2<i32> {
         // convert the bool array to an array of 1 and 0 of type i32
-        let arr = self.arr.mapv(|x| if x {1} else {0});
+        let arr = self.arr.mapv(|x| if x {1i32} else {0i32});
         arr.sum_axis(Axis(axis))
     }
 }
@@ -61,7 +62,16 @@ impl Genotype for Genome {
 #[derive(Clone, Debug)]
 struct FitnessCalc {
     target_projections: (Array2<i32>, Array2<i32>, Array2<i32>),
+    max_diff: usize,
     }
+
+impl FitnessCalc {
+    pub fn new(target_projections: (Array2<i32>, Array2<i32>, Array2<i32>)) -> Self {
+        let genome_shape = (target_projections.1.shape()[0], target_projections.0.shape()[0], target_projections.0.shape()[1]);
+        let max_diff = genome_shape.0 * genome_shape.1 * (2 * genome_shape.2 + 1);
+        FitnessCalc { target_projections, max_diff }
+    }
+}
 
 impl FitnessFunction<Genome, usize> for FitnessCalc
 {
@@ -76,11 +86,10 @@ impl FitnessFunction<Genome, usize> for FitnessCalc
         let diff_0 = (proj_0 - &self.target_projections.0).mapv(|x| x.abs()).sum();
         let diff_1 = (proj_1 - &self.target_projections.1).mapv(|x| x.abs()).sum();
         let diff_2 = (proj_2 - &self.target_projections.2).mapv(|x| x.abs()).sum();
-        let diff = diff_0 as usize + diff_1 as usize + diff_2 as usize;
+        let diff = (diff_0 + diff_1 + diff_2) as usize;
 
-        // subtract from the maximum and divide by the maximum
-        let max_diff = self.target_projections.0.len() + self.target_projections.1.len() + self.target_projections.2.len();
-        (max_diff - diff) / max_diff * 100
+        // subtract from the maximum
+        self.max_diff - diff
     }
 
     fn average(&self, fitness_values: &[usize]) -> usize {
@@ -88,7 +97,7 @@ impl FitnessFunction<Genome, usize> for FitnessCalc
     }
 
     fn highest_possible_fitness(&self) -> usize {
-        100
+        self.max_diff
     }
 
     fn lowest_possible_fitness(&self) -> usize {
@@ -179,19 +188,26 @@ impl CrossoverOp<Genome> for UniformCrossBreeder {
         }
     }
 
+// implement subtraction for genomes
+impl Sub for Genome {
+    type Output = Array3<i32>;
+    fn sub(self, other: Self) -> Self::Output {
+        let diff: Array3<i32> = self.arr.mapv(|x| if x {1i32} else {0i32}) - other.arr.mapv(|x| if x {1i32} else {0i32});
+        diff.mapv(|x| x.abs())
+    }
+}
+
 // Exported function for Python
 #[no_mangle]
 pub extern "C" fn run_genetic_algorithm() {
 
-    let shape = (20, 20, 100);
-    let p = 0.8;
-    let x = generate_genome(shape, p);
-    let proj_0 = x.project(0);
-    let proj_1 = x.project(1);
-    let proj_2 = x.project(2);
-    let fitness_calc = FitnessCalc {
-        target_projections: (proj_0, proj_1, proj_2),
-    };
+    let shape = (200, 200, 200);
+    let p = 0.2;
+    let ground_truth: Genome = generate_genome(shape, p);
+    let proj_0 = ground_truth.project(0);
+    let proj_1 = ground_truth.project(1);
+    let proj_2 = ground_truth.project(2);
+    let fitness_calc = FitnessCalc::new((proj_0, proj_1, proj_2));
 
     let params = Parameter::default();
 
@@ -200,8 +216,8 @@ pub extern "C" fn run_genetic_algorithm() {
         .of_size(params.population_size)
         .uniform_at_random();
 
+    // TODO: find a good setup
     let mut projection_sim = simulate(
-        // TODO: find a good setup
         genetic_algorithm()
             .with_evaluation(fitness_calc.clone())
             .with_selection(MaximizeSelector::new(
@@ -232,29 +248,36 @@ pub extern "C" fn run_genetic_algorithm() {
             Ok(SimResult::Intermediate(step)) => {
                 let evaluated_population = step.result.evaluated_population;
                 let best_solution = step.result.best_solution;
+                let diff = (ground_truth.clone() - best_solution.solution.genome).sum() as f32 / (ground_truth.arr.len() as f32);
                 println!(
                     "Step: generation: {}, average_fitness: {}, \
-                     best fitness: {}, duration: {}, processing_time: {}",
+                     best fitness: {}, duration: {}, processing_time: {}, real diff: {}",
                     step.iteration,
                     evaluated_population.average_fitness(),
-                    best_solution.solution.fitness,
+                    best_solution.solution.fitness as f32 / fitness_calc.max_diff as f32,
                     step.duration.fmt(),
-                    step.processing_time.fmt()
+                    step.processing_time.fmt(),
+                    diff
                 );
             },
             Ok(SimResult::Final(step, processing_time, duration, stop_reason)) => {
                 let best_solution = step.result.best_solution;
+                let diff = (ground_truth.clone() - best_solution.solution.genome.clone()).sum();
                 println!("{}", stop_reason);
                 println!(
                     "Final result after {}: generation: {}, \
-                     best solution with fitness {} found in generation {}, processing_time: {}",
+                    best solution with fitness {} found in generation {}, processing_time: {}, real diff: {}",
                     duration.fmt(),
                     step.iteration,
                     best_solution.solution.fitness,
                     best_solution.generation,
-                    processing_time.fmt()
+                    processing_time.fmt(),
+                    diff
                 );
+                // println!("Final result: {:?}", best_solution.solution.genome.arr);
+                // println!("Ground truth: {:?}", ground_truth.arr);
                 break;
+                            
             },
             Err(error) => {
                 println!("{}", error);
