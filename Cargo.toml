@@ -9,6 +9,7 @@ edition = "2021"
 genevo = ">=0.7.1"
 ndarray = ">=0.15.6"
 rand = ">=0.8.5"
+memory-stats = ">=1.1.0"
 
 [lib]
 name = "tranmf"

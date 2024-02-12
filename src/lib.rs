@@ -2,9 +2,18 @@
 use genevo::{
     operator::prelude::*, mutation::value::RandomGenomeMutation, prelude::*, types::fmt::Display, operator::CrossoverOp, genetic::Parents
 };
+use memory_stats::memory_stats;
 use ndarray::prelude::*;
 // impor ttrait Sub
 use std::ops::Sub;
+
+pub fn mem_stats() {
+    if let Some(usage) = memory_stats() {
+        println!("Current memory usage (phys, virt), [MB]: {}, {}", usage.physical_mem / 2_usize.pow(20), usage.virtual_mem / 2_usize.pow(20));
+    } else {
+        println!("Couldn't get the current memory usage :(");
+    }
+}
 
 
 #[derive(Debug)]
@@ -21,7 +30,7 @@ struct Parameter {
 impl Default for Parameter {
     fn default() -> Self {
         Self {
-            population_size: 1000,
+            population_size: 6,
             generation_limit: 1000,
             num_individuals_per_parents: 100,
             selection_ratio: 0.5,
@@ -126,21 +135,25 @@ impl RandomGenomeMutation for Genome {
             mutation_rate: f64, 
             _min_value: &<Self as Genotype>::Dna, 
             _max_value: &<Self as Genotype>::Dna, 
-            _rng: &mut R
+            rng: &mut R
         ) -> Self
         where
             R: Rng + Sized
     {
         let mut mutated_genome = genome.clone();
         let shape = genome.arr.shape();
-        for i in 0..shape[0] {
-            for j in 0..shape[1] {
-                for k in 0..shape[2] {
-                    if rand::random::<f64>() < mutation_rate {
-                        mutated_genome.arr[[i, j, k]] = !mutated_genome.arr[[i, j, k]];
-                    }
-                }
-            }
+        // compute the indices of the genome to mutate
+        // by chosing mutation_rate * genome_size indices
+
+        let num_indices = (mutation_rate * (shape[0] * shape[1] * shape[2]) as f64) as usize;
+        let indices = [0..num_indices].map(|_| {
+            let i = rng.gen_range(0..shape[0]);
+            let j = rng.gen_range(0..shape[1]);
+            let k = rng.gen_range(0..shape[2]);
+            (i, j, k)
+        });
+        for (i, j, k) in indices {
+            mutated_genome.arr[[i, j, k]] = !mutated_genome.arr[[i, j, k]];
         }
         mutated_genome
     }
@@ -201,7 +214,7 @@ impl Sub for Genome {
 #[no_mangle]
 pub extern "C" fn run_genetic_algorithm() {
 
-    let shape = (200, 200, 200);
+    let shape = (20, 20, 20);
     let p = 0.2;
     let ground_truth: Genome = generate_genome(shape, p);
     let proj_0 = ground_truth.project(0);
@@ -239,6 +252,7 @@ pub extern "C" fn run_genetic_algorithm() {
         GenerationLimit::new(params.generation_limit),
     ))
     .build();
+    mem_stats();
 
     println!("Starting projection optimization with: {:?}", params);
 
@@ -259,6 +273,7 @@ pub extern "C" fn run_genetic_algorithm() {
                     step.processing_time.fmt(),
                     diff
                 );
+                mem_stats();
             },
             Ok(SimResult::Final(step, processing_time, duration, stop_reason)) => {
                 let best_solution = step.result.best_solution;
