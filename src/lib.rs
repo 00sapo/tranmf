@@ -6,7 +6,7 @@ use genevo::{
 use memory_stats::memory_stats;
 use ndarray::prelude::*;
 use std::fmt::Debug;
-use std::ops::{Index, Sub};
+use std::ops::Sub;
 
 pub fn mem_stats() {
     if let Some(usage) = memory_stats() {
@@ -27,7 +27,7 @@ struct Parameter {
     num_individuals_per_parents: usize,
     selection_ratio: f64,
     crossover_scale: f32,
-    recombination: f32,
+    recombination: (f32, f32),
     mutation_rate: f64,
     reinsertion_ratio: f64,
 }
@@ -39,8 +39,8 @@ impl Default for Parameter {
             generation_limit: 50000,
             num_individuals_per_parents: 3, // musst be 3 for DifferentialCrossover
             selection_ratio: 0.3,
-            crossover_scale: 0.9,
-            recombination: 0.2,
+            crossover_scale: 0.7,
+            recombination: (0.1, 0.3),
             mutation_rate: 0.01, //25,
             reinsertion_ratio: 0.3,
         }
@@ -49,9 +49,9 @@ impl Default for Parameter {
 
 type Int = i16;
 
-fn reconstruct_3d_array(arr: &Array2<Int>, shape2: usize) -> Array3<i8> {
+fn reconstruct_3d_array(arr: &Array2<Int>, shape2: usize) -> Array3<Int> {
     // construct the 3d array
-    let mut arr3d = Array3::<i8>::default((arr.shape()[0], arr.shape()[1], shape2));
+    let mut arr3d = Array3::<Int>::default((arr.shape()[0], arr.shape()[1], shape2));
     for i in 0..arr.shape()[0] {
         for j in 0..arr.shape()[1] {
             let k = arr[[i, j]] as usize;
@@ -73,9 +73,9 @@ struct Genome {
 impl Genome {
     fn from_arr(arr: Array2<Int>, shape2: usize) -> Self {
         let arr3d = reconstruct_3d_array(&arr, shape2);
-        let proj_0 = arr3d.sum_axis(Axis(0)).mapv(|x| x as Int);
-        let proj_1 = arr3d.sum_axis(Axis(1)).mapv(|x| x as Int);
-        let proj_2 = arr3d.sum_axis(Axis(2)).mapv(|x| x as Int);
+        let proj_0 = arr3d.sum_axis(Axis(0));
+        let proj_1 = arr3d.sum_axis(Axis(1));
+        let proj_2 = arr3d.sum_axis(Axis(2));
         Genome {
             arr,
             projections: (proj_0, proj_1, proj_2),
@@ -140,12 +140,12 @@ impl Genotype for Genome {
 
 /// The fitness function for `Genome`s.
 #[derive(Clone, Debug)]
-struct FitnessCalc {
+struct FitnessStruct {
     target_projections: (Array2<Int>, Array2<Int>, Array2<Int>),
     max_diff: Int,
 }
 
-impl FitnessCalc {
+impl FitnessStruct {
     pub fn new(target_projections: (Array2<Int>, Array2<Int>, Array2<Int>)) -> Self {
         let genome_shape = (
             target_projections.1.shape()[0],
@@ -153,14 +153,14 @@ impl FitnessCalc {
             target_projections.0.shape()[1],
         );
         let max_diff = (genome_shape.0 * genome_shape.1 * genome_shape.2 * 2) as Int;
-        FitnessCalc {
+        FitnessStruct {
             target_projections,
             max_diff,
         }
     }
 }
 
-impl FitnessFunction<Genome, usize> for FitnessCalc {
+impl FitnessFunction<Genome, usize> for FitnessStruct {
     fn fitness_of(&self, genome: &Genome) -> usize {
         // compute the projections of the genome
         let proj_0 = genome.project(0);
@@ -197,7 +197,7 @@ impl FitnessFunction<Genome, usize> for FitnessCalc {
 
 #[derive(Clone, Debug)]
 struct DifferentialCrossover {
-    recombination: f32,
+    recombination: (f32, f32),
     crossover_scale: f32,
 }
 
@@ -229,7 +229,8 @@ impl CrossoverOp<Genome> for DifferentialCrossover {
             let parent_diff = (parents[b].arr.clone() - parents[c].arr.clone())
                 .mapv(|x| ((x as f32) * self.crossover_scale).round() as Int);
             let b_first = genome_arr.clone() + parent_diff;
-            let num_indices = genome_arr.len() * self.recombination as usize;
+            let num_indices = genome_arr.len()
+                * rng.gen_range(self.recombination.0..self.recombination.1) as usize;
             for _ in 0..num_indices {
                 let i = rng.gen_range(0..genome_shape[0]);
                 let j = rng.gen_range(0..genome_shape[1]);
@@ -270,7 +271,7 @@ impl RandomGenomeMutation for Genome {
 }
 
 impl Sub for Genome {
-    type Output = Array3<i8>;
+    type Output = Array3<Int>;
     fn sub(self, other: Self) -> Self::Output {
         // reconstruct the 3d array
         let arr3d_1 = reconstruct_3d_array(&self.arr, self.projections.2.shape()[1]);
@@ -313,7 +314,7 @@ pub extern "C" fn run_genetic_algorithm() {
         );
 
     let ground_truth = Genome::from_shape(shape, &shape2_mask, rng);
-    let fitness_calc = FitnessCalc::new(ground_truth.projections.clone());
+    let fitness_calc = FitnessStruct::new(ground_truth.projections.clone());
 
     let params = Parameter::default();
 
