@@ -1,10 +1,12 @@
 // import rand crate
-use genevo::{genetic::Parents, operator::prelude::*, operator::CrossoverOp, prelude::*};
+use genevo::{
+    genetic::Parents, operator::prelude::*, operator::CrossoverOp, operator::GeneticOperator,
+    prelude::*,
+};
 use memory_stats::memory_stats;
 use ndarray::prelude::*;
-use ndarray_stats::QuantileExt;
 use std::fmt::Debug;
-use std::ops::Sub;
+use std::ops::{Index, Sub};
 
 pub fn mem_stats() {
     if let Some(usage) = memory_stats() {
@@ -24,7 +26,8 @@ struct Parameter {
     generation_limit: u64,
     num_individuals_per_parents: usize,
     selection_ratio: f64,
-    // num_crossover_points: usize,
+    crossover_scale: f32,
+    recombination: f32,
     mutation_rate: f64,
     reinsertion_ratio: f64,
 }
@@ -32,13 +35,14 @@ struct Parameter {
 impl Default for Parameter {
     fn default() -> Self {
         Self {
-            population_size: 4000,
+            population_size: 100,
             generation_limit: 50000,
-            num_individuals_per_parents: 200,
-            selection_ratio: 0.5,
-            // num_crossover_points: 2,
+            num_individuals_per_parents: 3, // musst be 3 for DifferentialCrossover
+            selection_ratio: 0.3,
+            crossover_scale: 0.9,
+            recombination: 0.2,
             mutation_rate: 0.01, //25,
-            reinsertion_ratio: 0.5,
+            reinsertion_ratio: 0.3,
         }
     }
 }
@@ -191,7 +195,19 @@ impl FitnessFunction<Genome, usize> for FitnessCalc {
     }
 }
 
-impl CrossoverOp<Genome> for UniformCrossBreeder {
+#[derive(Clone, Debug)]
+struct DifferentialCrossover {
+    recombination: f32,
+    crossover_scale: f32,
+}
+
+impl GeneticOperator for DifferentialCrossover {
+    fn name() -> String {
+        "DifferentialCrossover".to_string()
+    }
+}
+
+impl CrossoverOp<Genome> for DifferentialCrossover {
     fn crossover<R>(&self, parents: Parents<Genome>, rng: &mut R) -> Vec<Genome>
     where
         R: Rng + Sized,
@@ -202,26 +218,24 @@ impl CrossoverOp<Genome> for UniformCrossBreeder {
         // breed one child for each partner in parents
         let mut children: Vec<Genome> = Vec::with_capacity(num_parents);
         while num_parents > children.len() {
-            let mut genome_arr = parents[0].arr.clone();
-            for sp in 0..num_parents {
-                // pick % of the indices to copy from parents[1]
-                let num_indices = genome_shape[0] * genome_shape[1] / parents.len();
-                for _ in 0..num_indices {
-                    let i = rng.gen_range(0..genome_shape[0]);
-                    let j = rng.gen_range(0..genome_shape[1]);
-                    // assign the average value of the two parents
-                    // TODO: differential evolution here
-                    // respecting shape2 projection
-                    // let avg: Int = (parents[0].arr[[i, j]].clone() - parents[sp].arr[[i, j]].clone())
-                    //     * T::from_f64(0.5).unwrap()
-                    //     + parents[0].arr[[i, j]].clone();
-                    // genome_arr[[i, j]] = avg;
-                    // copy the value from the 2nd parent
-                    genome_arr
-                        .slice_mut(s![i, j])
-                        .assign(&parents[sp].arr.slice(s![i, j]));
-                }
+            let a = children.len();
+            let (b, c) = match a {
+                0 => (1, 2),
+                1 => (0, 2),
+                2 => (0, 1),
+                _ => panic!("Invalid number of parents"),
+            };
+            let mut genome_arr = parents[a].arr.clone();
+            let parent_diff = (parents[b].arr.clone() - parents[c].arr.clone())
+                .mapv(|x| ((x as f32) * self.crossover_scale).round() as Int);
+            let b_first = genome_arr.clone() + parent_diff;
+            let num_indices = genome_arr.len() * self.recombination as usize;
+            for _ in 0..num_indices {
+                let i = rng.gen_range(0..genome_shape[0]);
+                let j = rng.gen_range(0..genome_shape[1]);
+                genome_arr[[i, j]] = b_first[[i, j]];
             }
+
             children.push(Genome::from_arr(genome_arr, genome_shape_2));
         }
         children
@@ -310,6 +324,7 @@ pub extern "C" fn run_genetic_algorithm() {
         rng,
     );
 
+    //////////////////////////////////////////////////
     let mut projection_sim = simulate(
         genetic_algorithm()
             .with_evaluation(fitness_calc.clone())
@@ -317,7 +332,10 @@ pub extern "C" fn run_genetic_algorithm() {
                 params.selection_ratio,
                 params.num_individuals_per_parents,
             ))
-            .with_crossover(UniformCrossBreeder::default())
+            .with_crossover(DifferentialCrossover {
+                recombination: params.recombination,
+                crossover_scale: params.crossover_scale,
+            })
             .with_mutation(RandomValueMutator::new(
                 params.mutation_rate,
                 0 as Int,
@@ -336,6 +354,8 @@ pub extern "C" fn run_genetic_algorithm() {
         GenerationLimit::new(params.generation_limit),
     ))
     .build();
+
+    /////////////////////////////////////////////////
     mem_stats();
 
     println!("Starting projection optimization with: {:?}", params);
