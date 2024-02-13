@@ -20,6 +20,8 @@ pub fn mem_stats() {
     }
 }
 
+type Int = i32;
+
 #[derive(Debug)]
 struct Parameter {
     population_size: usize,
@@ -35,32 +37,40 @@ struct Parameter {
 impl Default for Parameter {
     fn default() -> Self {
         Self {
-            population_size: 100,
+            population_size: 3000,
             generation_limit: 50000,
             num_individuals_per_parents: 3, // musst be 3 for DifferentialCrossover
-            selection_ratio: 0.3,
-            crossover_scale: 0.7,
+            selection_ratio: 0.1,
+            crossover_scale: 0.9,
             recombination: (0.1, 0.3),
             mutation_rate: 0.01, //25,
-            reinsertion_ratio: 0.3,
+            reinsertion_ratio: 0.1,
         }
     }
 }
 
-type Int = i16;
-
 fn reconstruct_3d_array(arr: &Array2<Int>, shape2: usize) -> Array3<Int> {
     // construct the 3d array
-    let mut arr3d = Array3::<Int>::default((arr.shape()[0], arr.shape()[1], shape2));
-    for i in 0..arr.shape()[0] {
-        for j in 0..arr.shape()[1] {
-            let k = arr[[i, j]] as usize;
-            if k < shape2 {
-                arr3d[[i, j, k]] = 1;
+    Array3::<Int>::from_shape_fn((arr.shape()[0], arr.shape()[1], shape2), |(i, j, k)| {
+        if arr[[i, j]] == k as Int {
+            1
+        } else {
+            0
+        }
+    })
+}
+
+fn arr3d_to_map(arr: &Array3<Int>) -> Array2<Int> {
+    let shape = arr.shape();
+    // convert the index of the 1s along the 2nd axis to their indices
+    Array2::<Int>::from_shape_fn((shape[0], shape[1]), |(i, j)| {
+        for k in 0..shape[2] {
+            if arr[[i, j, k]] != Int::zero() {
+                return k as Int;
             }
         }
-    }
-    arr3d
+        shape[2] as Int
+    })
 }
 
 /// The genotype
@@ -89,33 +99,22 @@ impl Genome {
         shape2_mask: &Array2<Int>,
         rng: &mut impl Rng,
     ) -> Self {
-        let mut arr3d = Array3::<bool>::default(shape);
+        let mut arr3d = Array3::<Int>::zeros(shape);
         for i in 0..shape.0 {
             for j in 0..shape.1 {
                 if shape2_mask[[i, j]] != Int::zero() {
                     let k = rng.gen_range(0..shape.2);
-                    arr3d[[i, j, k]] = true;
+                    arr3d[[i, j, k]] = 1;
                 }
             }
         }
 
-        // convert the index of the 1s along the 2nd axis to their indices
-        let arr = Array2::<Int>::from_shape_fn((shape.0, shape.1), |(i, j)| {
-            (0..shape.2)
-                .position(|k| arr3d[[i, j, k]])
-                .unwrap_or(shape.2) as Int
-        });
-
         // compute the projections
-        let proj_0 = arr3d
-            .mapv(|x| if x { 1 as Int } else { Int::zero() })
-            .sum_axis(Axis(0));
-        let proj_1 = arr3d
-            .mapv(|x| if x { 1 as Int } else { Int::zero() })
-            .sum_axis(Axis(1));
-        let proj_2 = arr3d
-            .mapv(|x| if x { 1 as Int } else { Int::zero() })
-            .sum_axis(Axis(2));
+        let proj_0 = arr3d.sum_axis(Axis(0));
+        let proj_1 = arr3d.sum_axis(Axis(1));
+        let proj_2 = arr3d.sum_axis(Axis(2));
+
+        let arr = arr3d_to_map(&arr3d);
 
         Genome {
             arr,
@@ -297,7 +296,7 @@ fn new_population(
 // Exported function for Python
 #[no_mangle]
 pub extern "C" fn run_genetic_algorithm() {
-    let shape = (10, 10, 10);
+    let shape = (50, 50, 100);
     let rng = &mut rand::thread_rng();
     let p = 0.5;
     // generate a random boolean matrix as a mask for the 3rd axis
@@ -312,8 +311,8 @@ pub extern "C" fn run_genetic_algorithm() {
                 }
             },
         );
-
     let ground_truth = Genome::from_shape(shape, &shape2_mask, rng);
+
     let fitness_calc = FitnessStruct::new(ground_truth.projections.clone());
 
     let params = Parameter::default();
@@ -382,7 +381,8 @@ pub extern "C" fn run_genetic_algorithm() {
             }
             Ok(SimResult::Final(step, _processing_time, duration, stop_reason)) => {
                 let best_solution = step.result.best_solution;
-                let diff = (ground_truth - best_solution.solution.genome).sum() as i32;
+                let diff =
+                    (ground_truth.clone() - best_solution.solution.genome.clone()).sum() as i32;
                 println!("{}", stop_reason);
                 println!(
                     "Final result after {}: generation: {}, \
@@ -393,8 +393,28 @@ pub extern "C" fn run_genetic_algorithm() {
                     best_solution.generation,
                     diff
                 );
-                // println!("Final result: {:?}", best_solution.solution.genome.arr);
-                // println!("Ground truth: {:?}", ground_truth.arr);
+                if diff != 0 {
+                    println!(
+                        "{:?}",
+                        reconstruct_3d_array(&best_solution.solution.genome.arr, shape.2)
+                    );
+                    println!("{:?}", reconstruct_3d_array(&ground_truth.arr, shape.2));
+                    println!("{:?}", best_solution.solution.genome.projections);
+                    println!("...");
+                    println!("{:?}", ground_truth.projections);
+                    println!("...");
+                    println!("{:?}", best_solution.solution.genome.arr);
+                    println!("...");
+                    println!("{:?}", best_solution.solution.genome - ground_truth.clone());
+                    println!("...");
+
+                    println!("{:?}", shape2_mask);
+                    println!("{:?}", ground_truth.arr);
+                    let new_map = reconstruct_3d_array(&ground_truth.arr, shape.2);
+                    println!("{:?}", new_map.sum_axis(Axis(2)));
+                    let new_ground_truth = Genome::from_arr(arr3d_to_map(&new_map), shape.2).arr;
+                    println!("{:?}", new_ground_truth);
+                }
                 break;
             }
             Err(error) => {
