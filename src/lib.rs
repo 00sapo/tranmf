@@ -6,7 +6,6 @@ use genevo::{
 use memory_stats::memory_stats;
 use ndarray::prelude::*;
 use std::fmt::Debug;
-use std::ops::Sub;
 
 pub fn mem_stats() {
     if let Some(usage) = memory_stats() {
@@ -37,14 +36,14 @@ struct Parameter {
 impl Default for Parameter {
     fn default() -> Self {
         Self {
-            population_size: 3000,
+            population_size: 1000,
             generation_limit: 50000,
             num_individuals_per_parents: 3, // musst be 3 for DifferentialCrossover
-            selection_ratio: 0.1,
-            crossover_scale: 0.9,
-            recombination: (0.1, 0.3),
+            selection_ratio: 0.75,
+            crossover_scale: 0.001,
+            recombination: (0.001, 0.2),
             mutation_rate: 0.01, //25,
-            reinsertion_ratio: 0.1,
+            reinsertion_ratio: 0.75,
         }
     }
 }
@@ -213,6 +212,7 @@ impl CrossoverOp<Genome> for DifferentialCrossover {
     {
         let genome_shape = parents[0].arr.shape();
         let genome_shape_2 = parents[0].projections.0.shape()[1];
+        let shape2_mask = &parents[0].projections.2;
         let num_parents = parents.len();
         // breed one child for each partner in parents
         let mut children: Vec<Genome> = Vec::with_capacity(num_parents);
@@ -230,10 +230,16 @@ impl CrossoverOp<Genome> for DifferentialCrossover {
             let b_first = genome_arr.clone() + parent_diff;
             let num_indices = genome_arr.len()
                 * rng.gen_range(self.recombination.0..self.recombination.1) as usize;
+            // Force constraint along the 2nd dimension
             for _ in 0..num_indices {
-                let i = rng.gen_range(0..genome_shape[0]);
-                let j = rng.gen_range(0..genome_shape[1]);
-                genome_arr[[i, j]] = b_first[[i, j]];
+                loop {
+                    let i = rng.gen_range(0..genome_shape[0]);
+                    let j = rng.gen_range(0..genome_shape[1]);
+                    if shape2_mask[[i, j]] == 1 {
+                        genome_arr[[i, j]] = b_first[[i, j]];
+                        break;
+                    }
+                }
             }
 
             children.push(Genome::from_arr(genome_arr, genome_shape_2));
@@ -269,16 +275,6 @@ impl RandomGenomeMutation for Genome {
     }
 }
 
-impl Sub for Genome {
-    type Output = Array3<Int>;
-    fn sub(self, other: Self) -> Self::Output {
-        // reconstruct the 3d array
-        let arr3d_1 = reconstruct_3d_array(&self.arr, self.projections.2.shape()[1]);
-        let arr3d_2 = reconstruct_3d_array(&other.arr, other.projections.2.shape()[1]);
-        (arr3d_1 - arr3d_2).mapv(|x| x.abs())
-    }
-}
-
 fn new_population(
     size: usize,
     shape: (usize, usize, usize),
@@ -299,7 +295,7 @@ pub extern "C" fn run_genetic_algorithm() {
     let shape = (50, 50, 100);
     let rng = &mut rand::thread_rng();
     let p = 0.5;
-    // generate a random boolean matrix as a mask for the 3rd axis
+    // generate a random boolean
     let shape2_mask =
         Array2::<Int>::from_shape_fn(
             (shape.0, shape.1),
@@ -366,9 +362,14 @@ pub extern "C" fn run_genetic_algorithm() {
             Ok(SimResult::Intermediate(step)) => {
                 let evaluated_population = step.result.evaluated_population;
                 let best_solution = step.result.best_solution;
-                let diff = (ground_truth.clone() - best_solution.solution.genome.clone()).sum()
-                    as f32
-                    / (shape.0 * shape.1) as f32;
+                let diff = ground_truth
+                    .projections
+                    .2
+                    .iter()
+                    .zip(best_solution.solution.genome.projections.2.iter())
+                    .map(|(&x, &y)| if x != y { 1f32 } else { 0f32 })
+                    .sum::<f32>()
+                    / (ground_truth.projections.2.len()) as f32;
                 println!(
                     "Step: generation: {}, average_fitness: {}, \
                     best fitness: {}, real diff: {}",
@@ -381,8 +382,13 @@ pub extern "C" fn run_genetic_algorithm() {
             }
             Ok(SimResult::Final(step, _processing_time, duration, stop_reason)) => {
                 let best_solution = step.result.best_solution;
-                let diff =
-                    (ground_truth.clone() - best_solution.solution.genome.clone()).sum() as i32;
+                let diff = ground_truth
+                    .projections
+                    .2
+                    .iter()
+                    .zip(best_solution.solution.genome.projections.2.iter())
+                    .map(|(&x, &y)| if x != y { 1 } else { 0 })
+                    .sum::<i32>();
                 println!("{}", stop_reason);
                 println!(
                     "Final result after {}: generation: {}, \
@@ -393,28 +399,26 @@ pub extern "C" fn run_genetic_algorithm() {
                     best_solution.generation,
                     diff
                 );
-                if diff != 0 {
-                    println!(
-                        "{:?}",
-                        reconstruct_3d_array(&best_solution.solution.genome.arr, shape.2)
-                    );
-                    println!("{:?}", reconstruct_3d_array(&ground_truth.arr, shape.2));
-                    println!("{:?}", best_solution.solution.genome.projections);
-                    println!("...");
-                    println!("{:?}", ground_truth.projections);
-                    println!("...");
-                    println!("{:?}", best_solution.solution.genome.arr);
-                    println!("...");
-                    println!("{:?}", best_solution.solution.genome - ground_truth.clone());
-                    println!("...");
-
-                    println!("{:?}", shape2_mask);
-                    println!("{:?}", ground_truth.arr);
-                    let new_map = reconstruct_3d_array(&ground_truth.arr, shape.2);
-                    println!("{:?}", new_map.sum_axis(Axis(2)));
-                    let new_ground_truth = Genome::from_arr(arr3d_to_map(&new_map), shape.2).arr;
-                    println!("{:?}", new_ground_truth);
-                }
+                // if diff != 0 {
+                //     println!(
+                //         "{:?}",
+                //         reconstruct_3d_array(&best_solution.solution.genome.arr, shape.2)
+                //     );
+                //     println!("{:?}", reconstruct_3d_array(&ground_truth.arr, shape.2));
+                //     println!("{:?}", best_solution.solution.genome.projections);
+                //     println!("...");
+                //     println!("{:?}", ground_truth.projections);
+                //     println!("...");
+                //     println!("{:?}", best_solution.solution.genome.arr);
+                //     println!("...");
+                //
+                //     println!("{:?}", shape2_mask);
+                //     println!("{:?}", ground_truth.arr);
+                //     let new_map = reconstruct_3d_array(&ground_truth.arr, shape.2);
+                //     println!("{:?}", new_map.sum_axis(Axis(2)));
+                //     let new_ground_truth = Genome::from_arr(arr3d_to_map(&new_map), shape.2).arr;
+                //     println!("{:?}", new_ground_truth);
+                // }
                 break;
             }
             Err(error) => {
