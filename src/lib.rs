@@ -6,6 +6,7 @@ use genevo::{
 use memory_stats::memory_stats;
 use ndarray::prelude::*;
 use std::fmt::Debug;
+use std::io;
 
 pub fn mem_stats() {
     if let Some(usage) = memory_stats() {
@@ -28,6 +29,8 @@ struct Parameter {
     num_individuals_per_parents: usize,
     selection_ratio: f64,
     crossover_scale: f32,
+    crossover_fitness_ratio: f32,
+    crossover_fitness_prob: f32,
     recombination: (f32, f32),
     mutation_rate: f64,
     reinsertion_ratio: f64,
@@ -36,14 +39,16 @@ struct Parameter {
 impl Default for Parameter {
     fn default() -> Self {
         Self {
-            population_size: 1000,
+            population_size: 5000,
             generation_limit: 50000,
-            num_individuals_per_parents: 3, // musst be 3 for DifferentialCrossover
-            selection_ratio: 0.75,
-            crossover_scale: 0.001,
-            recombination: (0.001, 0.2),
-            mutation_rate: 0.01, //25,
-            reinsertion_ratio: 0.75,
+            num_individuals_per_parents: 1000, // musst be 3 for DifferentialCrossover
+            selection_ratio: 0.5,
+            crossover_scale: 0.7,
+            crossover_fitness_ratio: 1.00,
+            crossover_fitness_prob: 0.5,
+            recombination: (0.1, 0.3),
+            mutation_rate: 0.001,
+            reinsertion_ratio: 0.5,
         }
     }
 }
@@ -136,10 +141,42 @@ impl Genotype for Genome {
     type Dna = Int;
 }
 
+#[derive(Clone, Debug)]
+struct TargetProjections {
+    proj_0: Array2<Int>,
+    proj_1: Array2<Int>,
+    proj_2: Array2<Int>,
+}
+
+impl TargetProjections {
+    fn new(ground_truth: &Genome) -> Self {
+        let proj_0 = ground_truth.project(0).clone();
+        let proj_1 = ground_truth.project(1).clone();
+        let proj_2 = ground_truth.project(2).clone();
+        TargetProjections {
+            proj_0,
+            proj_1,
+            proj_2,
+        }
+    }
+    fn fitness(&self, genome: &Genome) -> (Array2<Int>, Array2<Int>) {
+        // compute the projections of the genome
+        let proj_0 = genome.project(0);
+        let proj_1 = genome.project(1);
+        // let proj_2 = genome.project(2);
+        // take the sum of the absolute differences
+        // between the projections and the target projections
+        let diff_0 = proj_0 - &self.proj_0;
+        let diff_1 = proj_1 - &self.proj_1;
+        // let diff_2 = (proj_2 - &target_projections.2).mapv(|x| abs(x)).sum();
+        (diff_0, diff_1)
+    }
+}
+
 /// The fitness function for `Genome`s.
 #[derive(Clone, Debug)]
 struct FitnessStruct {
-    target_projections: (Array2<Int>, Array2<Int>, Array2<Int>),
+    target_projections: TargetProjections,
     max_diff: Int,
 }
 
@@ -151,6 +188,11 @@ impl FitnessStruct {
             target_projections.0.shape()[1],
         );
         let max_diff = (genome_shape.0 * genome_shape.1 * genome_shape.2 * 2) as Int;
+        let target_projections = TargetProjections {
+            proj_0: target_projections.0.clone(),
+            proj_1: target_projections.1.clone(),
+            proj_2: target_projections.2.clone(),
+        };
         FitnessStruct {
             target_projections,
             max_diff,
@@ -160,23 +202,9 @@ impl FitnessStruct {
 
 impl FitnessFunction<Genome, usize> for FitnessStruct {
     fn fitness_of(&self, genome: &Genome) -> usize {
-        // compute the projections of the genome
-        let proj_0 = genome.project(0);
-        let proj_1 = genome.project(1);
-        // let proj_2 = genome.project(2);
-
-        // take the sum of the absolute differences
-        // between the projections and the target projections
-        let diff_0 = (proj_0 - &self.target_projections.0)
-            .mapv(|x| x.abs())
-            .sum();
-        let diff_1 = (proj_1 - &self.target_projections.1)
-            .mapv(|x| x.abs())
-            .sum();
-        // let diff_2 = (proj_2 - &self.target_projections.2).mapv(|x| abs(x)).sum();
-        let diff = diff_0 + diff_1; // + diff_2;
-
+        let (diff0, diff1) = self.target_projections.fitness(genome);
         // subtract from the maximum
+        let diff = diff0.mapv(|x| x.abs()).sum() + diff1.mapv(|x| x.abs()).sum();
         (self.max_diff - diff) as usize
     }
 
@@ -197,6 +225,9 @@ impl FitnessFunction<Genome, usize> for FitnessStruct {
 struct DifferentialCrossover {
     recombination: (f32, f32),
     crossover_scale: f32,
+    crossover_fitness_ratio: f32,
+    crossover_fitness_prob: f32,
+    target_projections: TargetProjections,
 }
 
 impl GeneticOperator for DifferentialCrossover {
@@ -212,39 +243,61 @@ impl CrossoverOp<Genome> for DifferentialCrossover {
     {
         let genome_shape = parents[0].arr.shape();
         let genome_shape_2 = parents[0].projections.0.shape()[1];
-        let shape2_mask = &parents[0].projections.2;
         let num_parents = parents.len();
         // breed one child for each partner in parents
         let mut children: Vec<Genome> = Vec::with_capacity(num_parents);
         while num_parents > children.len() {
-            let a = children.len();
-            let (b, c) = match a {
-                0 => (1, 2),
-                1 => (0, 2),
-                2 => (0, 1),
-                _ => panic!("Invalid number of parents"),
-            };
-            let mut genome_arr = parents[a].arr.clone();
-            let parent_diff = (parents[b].arr.clone() - parents[c].arr.clone())
-                .mapv(|x| ((x as f32) * self.crossover_scale).round() as Int);
-            let b_first = genome_arr.clone() + parent_diff;
-            let num_indices = genome_arr.len()
-                * rng.gen_range(self.recombination.0..self.recombination.1) as usize;
-            // Force constraint along the 2nd dimension
-            for _ in 0..num_indices {
-                loop {
+            let mut genome_arr = parents[0].arr.clone();
+            let fitness = self.target_projections.fitness(&parents[0]);
+            for sp in 0..num_parents {
+                // pick % of the indices to copy from parents[1]
+                let num_indices = genome_shape[0] * genome_shape[1] / parents.len();
+                for _ in 0..num_indices {
                     let i = rng.gen_range(0..genome_shape[0]);
                     let j = rng.gen_range(0..genome_shape[1]);
-                    if shape2_mask[[i, j]] == 1 {
-                        genome_arr[[i, j]] = b_first[[i, j]];
-                        break;
-                    }
+                    // assign the average value of the two parents
+                    // TODO: differential evolution here
+                    // respecting shape2 projection
+                    // let avg: Int = (parents[0].arr[[i, j]].clone() - parents[sp].arr[[i, j]].clone())
+                    //     * T::from_f64(0.5).unwrap()
+                    //     + parents[0].arr[[i, j]].clone();
+                    // genome_arr[[i, j]] = avg;
+                    // copy the value from the 2nd parent
+                    genome_arr
+                        .slice_mut(s![i, j])
+                        .assign(&parents[sp].arr.slice(s![i, j]));
                 }
             }
+
+            // adjust_genome(
+            //     &mut genome_arr,
+            //     fitness,
+            //     self.crossover_fitness_ratio,
+            //     self.crossover_fitness_prob,
+            //     rng,
+            // );
 
             children.push(Genome::from_arr(genome_arr, genome_shape_2));
         }
         children
+    }
+}
+
+fn adjust_genome(
+    genome_arr: &mut Array2<Int>,
+    fitness: (Array2<Int>, Array2<Int>),
+    ratio: f32,
+    prob: f32,
+    rng: &mut impl Rng,
+) {
+    // sort the indices by the difference
+    let indices = argsort(&fitness.0, &fitness.1);
+    let end = (indices.len() as f32 * ratio).round() as usize;
+    for idx in &indices[0..end] {
+        if rng.gen_bool(prob as f64) {
+            let diff = (fitness.0[[idx.0, idx.2]] + fitness.1[[idx.1, idx.2]]) as f64 / 2f64;
+            genome_arr[[idx.1, idx.0]] += diff.round() as Int;
+        }
     }
 }
 
@@ -275,24 +328,97 @@ impl RandomGenomeMutation for Genome {
     }
 }
 
+/// returns a vector of (usize, usize, usize) representing the indices
+/// sorted of the two input arrays
+/// input arrays must have the second dimension of the same size, and it will be in the third
+/// position of the output
+fn argsort(data1: &Array2<Int>, data2: &Array2<Int>) -> Vec<(usize, usize, usize)> {
+    let shape1 = data1.shape();
+    let shape2 = data2.shape();
+    assert!(
+        shape1[1] == shape2[1],
+        "The second dimension must be the same"
+    );
+
+    let mut indices: Vec<(usize, usize, usize)> = (0..shape1[0])
+        .flat_map(|i| (0..shape2[0]).flat_map(move |j| (0..shape1[1]).map(move |k| (i, j, k))))
+        .collect();
+    indices.sort_by_key(|&idx| data1[[idx.0, idx.2]] + data2[[idx.1, idx.2]]);
+    indices
+}
+
 fn new_population(
     size: usize,
-    shape: (usize, usize, usize),
-    shape2_mask: &Array2<Int>,
+    projections: &(Array2<Int>, Array2<Int>, Array2<Int>),
     rng: &mut impl Rng,
-) -> Population<Genome> {
+) -> Vec<Genome> {
+    let mut projections_0 = projections.0.clone();
+    let mut projections_1 = projections.1.clone();
+    // solve the problem with a greedy approach
+    let shape = (
+        projections_1.shape()[0],
+        projections_0.shape()[0],
+        projections_0.shape()[1],
+    );
+    let mut root = Array2::<Int>::from_elem((shape.0, shape.1), shape.2 as Int);
+    // println!("Prj0\n{:?}", projections_0);
+    // println!("Prj1\n{:?}", projections_1);
+    'outer: loop {
+        let mut indices = argsort(&projections_1, &projections_0);
+        indices.reverse();
+        // println!("Indices\n{:?}", indices);
+        let mut breaking = false;
+        'inner: for idx in indices {
+            // println!("Idx{:?}", idx);
+            if projections.2[[idx.0, idx.1]] == 1
+                && projections_0[[idx.1, idx.2]] != 0
+                && projections_1[[idx.0, idx.2]] != 0
+            {
+                root[[idx.0, idx.1]] = idx.2 as Int;
+                projections_0[[idx.1, idx.2]] -= 1;
+                projections_1[[idx.0, idx.2]] -= 1;
+                breaking = true;
+                break 'inner;
+            }
+        }
+        // println!("Root\n{:?}", root);
+        // println!("Prj0\n{:?}", projections_0);
+        // println!("Prj1\n{:?}", projections_1);
+        if !breaking {
+            break 'outer;
+        }
+    }
+
+    // // force values != shape.2 where there is 1 in the projections.2
+    // projections.2.indexed_iter().for_each(|(idx, &x)| {
+    //     if x == 1 && root[[idx.0, idx.1]] == shape.2 as Int {
+    //         root[[idx.0, idx.1]] = shape.2 as Int / 2;
+    //     }
+    // });
+
     // generate a vec of genomes with p distributed from 0 to 1 with step 1 / size
     let mut pop = Vec::with_capacity(size);
-    for _ in 0..size {
-        pop.push(Genome::from_shape(shape, shape2_mask, rng));
+    pop.push(Genome::from_arr(root.clone(), shape.2));
+    for p in 1..size {
+        let mut genome = root.clone();
+        for i in 0..shape.0 {
+            for j in 0..shape.1 {
+                if rng.gen_bool(1f64 / size as f64 * p as f64)
+                    && (projections.2[[i, j]] != Int::zero())
+                {
+                    genome[[i, j]] = rng.gen_range(0..shape.2 as Int);
+                }
+            }
+        }
+        pop.push(Genome::from_arr(genome, shape.2));
     }
-    Population::with_individuals(pop)
+    pop
 }
 
 // Exported function for Python
 #[no_mangle]
 pub extern "C" fn run_genetic_algorithm() {
-    let shape = (50, 50, 100);
+    let shape = (10, 10, 10);
     let rng = &mut rand::thread_rng();
     let p = 0.5;
     // generate a random boolean
@@ -308,22 +434,34 @@ pub extern "C" fn run_genetic_algorithm() {
             },
         );
     let ground_truth = Genome::from_shape(shape, &shape2_mask, rng);
+    let target_projections = TargetProjections::new(&ground_truth);
 
-    let fitness_calc = FitnessStruct::new(ground_truth.projections.clone());
+    let fitness_obj = FitnessStruct::new(ground_truth.projections.clone());
 
     let params = Parameter::default();
 
-    let initial_population = new_population(
-        params.population_size,
-        shape,
-        &ground_truth.projections.2,
-        rng,
-    );
+    println!("Projections 2\n{:?}", ground_truth.projections.2);
+    println!("Target\n{:?}", ground_truth.arr);
+    let initial_population = new_population(params.population_size, &ground_truth.projections, rng);
+
+    // print the first element of initial_population and its diff from ground_truth
+    let first_genome = &initial_population[0];
+    let diff = ground_truth
+        .arr
+        .iter()
+        .zip(first_genome.arr.iter())
+        .map(|(&x, &y)| if x != y { 1 } else { 0 })
+        .sum::<i32>();
+    println!("{:?}", ground_truth.projections.2);
+    println!("{:?}", ground_truth.arr);
+    println!("{:?}", first_genome.arr);
+    println!("Initial diff: {}", diff);
+    // return;
 
     //////////////////////////////////////////////////
     let mut projection_sim = simulate(
         genetic_algorithm()
-            .with_evaluation(fitness_calc.clone())
+            .with_evaluation(fitness_obj.clone())
             .with_selection(MaximizeSelector::new(
                 params.selection_ratio,
                 params.num_individuals_per_parents,
@@ -331,6 +469,9 @@ pub extern "C" fn run_genetic_algorithm() {
             .with_crossover(DifferentialCrossover {
                 recombination: params.recombination,
                 crossover_scale: params.crossover_scale,
+                crossover_fitness_ratio: params.crossover_fitness_ratio,
+                crossover_fitness_prob: params.crossover_fitness_prob,
+                target_projections: target_projections.clone(),
             })
             .with_mutation(RandomValueMutator::new(
                 params.mutation_rate,
@@ -338,15 +479,15 @@ pub extern "C" fn run_genetic_algorithm() {
                 shape.2 as Int,
             ))
             .with_reinsertion(ElitistReinserter::new(
-                fitness_calc.clone(),
+                fitness_obj.clone(),
                 true,
                 params.reinsertion_ratio,
             ))
-            .with_initial_population(initial_population)
+            .with_initial_population(Population::with_individuals(initial_population))
             .build(),
     )
     .until(or(
-        FitnessLimit::new(fitness_calc.highest_possible_fitness()),
+        FitnessLimit::new(fitness_obj.highest_possible_fitness()),
         GenerationLimit::new(params.generation_limit),
     ))
     .build();
@@ -363,19 +504,18 @@ pub extern "C" fn run_genetic_algorithm() {
                 let evaluated_population = step.result.evaluated_population;
                 let best_solution = step.result.best_solution;
                 let diff = ground_truth
-                    .projections
-                    .2
+                    .arr
                     .iter()
-                    .zip(best_solution.solution.genome.projections.2.iter())
-                    .map(|(&x, &y)| if x != y { 1f32 } else { 0f32 })
-                    .sum::<f32>()
-                    / (ground_truth.projections.2.len()) as f32;
+                    .zip(best_solution.solution.genome.arr.iter())
+                    .map(|(&x, &y)| if x != y { 1f64 } else { 0f64 })
+                    .sum::<f64>()
+                    / (ground_truth.projections.2.len() as f64);
                 println!(
                     "Step: generation: {}, average_fitness: {}, \
-                    best fitness: {}, real diff: {}",
+                    best fitness: {:?} real diff: {:?}",
                     step.iteration,
                     evaluated_population.average_fitness(),
-                    best_solution.solution.fitness as f32 / fitness_calc.max_diff as f32,
+                    best_solution.solution.fitness as f64 / fitness_obj.max_diff as f64,
                     diff,
                 );
                 mem_stats();
@@ -383,10 +523,9 @@ pub extern "C" fn run_genetic_algorithm() {
             Ok(SimResult::Final(step, _processing_time, duration, stop_reason)) => {
                 let best_solution = step.result.best_solution;
                 let diff = ground_truth
-                    .projections
-                    .2
+                    .arr
                     .iter()
-                    .zip(best_solution.solution.genome.projections.2.iter())
+                    .zip(best_solution.solution.genome.arr.iter())
                     .map(|(&x, &y)| if x != y { 1 } else { 0 })
                     .sum::<i32>();
                 println!("{}", stop_reason);
