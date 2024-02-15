@@ -85,7 +85,7 @@ update_progress_bar() {
 files=$(ls *.svg)
 # count the number of $files
 nfiles=$(echo $files | wc -w)
-# count width of terminal
+# counter for the progress bar
 progress=0
 for file in $files; do
 	# print the bar progress
@@ -95,9 +95,9 @@ for file in $files; do
 	$inkscape $(realpath $file) --export-type=png --export-filename=$(basename $file .svg).png --export-area-drawing -h $height >/dev/null 2>&1
 done
 
-# put all akk the $tmpdir/*.png files into a tar file
+# put all the $tmpdir/*.png files into a tar file
 tar -cf $outdir/$(basename $1 .ttf).tar *.png
 
 # remove the temporary directory
-# rm -rf $tmpdir
+rm -rf $tmpdir
 cd $prevdir
