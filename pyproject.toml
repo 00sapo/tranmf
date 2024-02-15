@@ -25,6 +25,8 @@ dependencies = [
     "tqdm>=4.66.2",
     "pillow>=10.2.0",
     "pytest>=8.0.0",
+    "scikit-image>=0.22.0",
+    "opencv-python>=4.9.0.80",
 ]
 version = "0.1.0"
 
@@ -40,4 +42,5 @@ distribution = false
 dev = [
     "ipython>=8.21.0",
     "ipdb>=0.13.13",
+    "degan @ file:///${PROJECT_ROOT}/../degan",
 ]
