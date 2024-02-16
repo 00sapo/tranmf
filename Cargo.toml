@@ -1,18 +1,24 @@
 [package]
-name = "tranmf"
+name = "_rustnmf"
 version = "0.1.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
-[dependencies]
-genevo = ">=0.7.1"
-ndarray = ">=0.15.6"
-ndarray-stats = "0.5.1"
-rand = ">=0.8.5"
-memory-stats = ">=1.1.0"
 
 [lib]
-name = "tranmf"
-path = "src/lib.rs"
+# The name of the native library. This is the name which will be used in Python to import the
+# library (i.e. `import string_sum`). If you change this, you must also change the name of the
+# `#[pymodule]` in `src/lib.rs`.
+name = "_rustnmf"
+
+# "cdylib" is necessary to produce a shared library for Python to import from.
 crate-type = ["cdylib"]
+# Downstream Rust code (including code in `bin/`, `examples/`, and `tests/`) will not be able
+# to `use string_sum;` unless the "rlib" or "lib" crate type is also included, e.g.:
+# crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+pyo3 = { version = ">=0.20.2", features = ["extension-module"] }
+numpy = ">=0.20.0"
+ndarray = ">=0.15.6"

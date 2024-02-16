@@ -1,32 +1,24 @@
 [project]
 name = "tranmf"
-dynamic = ["version"]
 description = "Default template for PDM package"
 readme = "README.md"
 requires-python = "==3.10.*"
-license = {text = "MIT"}
+license = { text = "MIT" }
 keywords = []
 authors = [
-    { name = "Federico Simonetta", email = "22996003+00sapo@users.noreply.github.com" },
+  { name = "Federico Simonetta", email = "22996003+00sapo@users.noreply.github.com" },
 ]
-classifiers = [
-  "Development Status :: 4 - Beta",
-  "Programming Language :: Python",
-  "Programming Language :: Python :: 3.10",
-  "Programming Language :: Python :: 3.11",
-  "Programming Language :: Python :: 3.12",
-  "Programming Language :: Python :: Implementation :: CPython",
-]
+
 dependencies = [
-    "numpy>=1.26.4",
-    "scipy>=1.12.0",
-    "mlflow>=2.10.1",
-    "setuptools>=69.0.3",
-    "tqdm>=4.66.2",
-    "pillow>=10.2.0",
-    "pytest>=8.0.0",
-    "scikit-image>=0.22.0",
-    "opencv-python>=4.9.0.80",
+  "numpy>=1.26.4",
+  "scipy>=1.12.0",
+  "mlflow>=2.10.1",
+  "setuptools>=69.0.3",
+  "tqdm>=4.66.2",
+  "pillow>=10.2.0",
+  "pytest>=8.0.0",
+  "scikit-image>=0.22.0",
+  "opencv-python>=4.9.0.80",
 ]
 version = "0.1.0"
 
@@ -35,12 +27,26 @@ Documentation = "https://github.com/00sapo/tranmf#readme"
 Issues = "https://github.com/00sapo/tranmf/issues"
 Source = "https://github.com/00sapo/tranmf"
 
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[tool.maturin]
+python-source = "src"
+module-name = "tranmf._rustnmf"
+
 [tool.pdm]
 distribution = false
 
+[tool.pdm.scripts]
+test = { composite = ["rsdevelop", "pytest"] }
+pytest = "python -m unittest"
+rsdevelop = "maturin develop"
+
 [tool.pdm.dev-dependencies]
 dev = [
-    "ipython>=8.21.0",
-    "ipdb>=0.13.13",
-    "degan @ file:///${PROJECT_ROOT}/../degan",
+  "ipython>=8.21.0",
+  "ipdb>=0.13.13",
+  "degan @ file:///${PROJECT_ROOT}/../degan",
+  "maturin>=1.4.0",
 ]
