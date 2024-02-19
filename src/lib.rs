@@ -1,7 +1,8 @@
-use ndarray::{Array, ArrayBase, Data, DataOwned, Dimension, Ix2, OwnedRepr, RawData};
-use num::Zero;
+use ndarray::{linalg::Dot, ArrayBase, Data, Dimension, Ix2, RawData};
+use num::{Signed, Zero};
 use pyo3::prelude::*;
-use std::ops::{AddAssign, MulAssign};
+use std::iter::Sum;
+use std::ops::{AddAssign, Mul, MulAssign, Sub};
 
 struct Loss<R: RawData, D: Dimension> {
     components: Vec<Box<dyn LossComponent<R, D>>>,
@@ -9,103 +10,160 @@ struct Loss<R: RawData, D: Dimension> {
 
 impl<R, D> Loss<R, D>
 where
-    R: Data,
+    R: RawData,
     D: Dimension,
     R::Elem: Zero + Clone,
     ArrayBase<R, D>: AddAssign,
 {
-    fn compute(&self, v: &[ArrayBase<R, D>]) -> ArrayBase<R, D> {
-        let shape = v.get(0).unwrap().raw_dim();
-        let mut computed = self.components.iter().map(|c| c.compute(v));
-        let mut sum = computed.next().unwrap();
-        computed.for_each(|c| sum += c);
-        sum
-    }
-
-    fn gradient(&self, v: &[ArrayBase<R, D>]) -> ArrayBase<R, D> {
-        let shape = v.get(0).unwrap().raw_dim();
-        let mut computed = self.components.iter().map(|c| c.gradient(v));
+    fn compute(
+        &self,
+        w: &ArrayBase<R, D>,
+        h: &ArrayBase<R, D>,
+        v_guessed: &ArrayBase<R, D>,
+        v_target: &ArrayBase<R, D>,
+    ) -> f64 {
+        let mut computed = self
+            .components
+            .iter()
+            .map(|c| c.compute(w, h, v_guessed, v_target));
         let mut sum = computed.next().unwrap();
         computed.for_each(|c| sum += c);
         sum
     }
 }
 
+/// a Component of the loss; components will be summed; only used for checking tolerance.
 trait LossComponent<R: RawData, D: Dimension> {
-    fn compute(&self, v: &[ArrayBase<R, D>]) -> ArrayBase<R, D>;
-    fn gradient(&self, v: &[ArrayBase<R, D>]) -> ArrayBase<R, D>;
+    fn compute(
+        &self,
+        w: &ArrayBase<R, D>,
+        h: &ArrayBase<R, D>,
+        v_guessed: &ArrayBase<R, D>,
+        v_target: &ArrayBase<R, D>,
+    ) -> f64;
 }
 
+struct LossEuclidean;
+
+impl<R, D> LossComponent<R, D> for LossEuclidean
+where
+    D: Dimension,
+    R: Data,
+    R::Elem: Sub<Output = R::Elem> + Mul<Output = R::Elem> + Signed + Copy,
+    f64: Sum<R::Elem>,
+{
+    fn compute(
+        &self,
+        _w: &ArrayBase<R, D>,
+        _h: &ArrayBase<R, D>,
+        v_guessed: &ArrayBase<R, D>,
+        v_target: &ArrayBase<R, D>,
+    ) -> f64 {
+        v_guessed
+            .iter()
+            .zip(v_target.iter())
+            .map(|(&x, &y)| (x - y).abs())
+            .sum::<f64>()
+            / (v_guessed.len() as f64)
+    }
+}
 trait UpdateComponent<R: RawData, D: Dimension> {
-    fn update_h(
-        &self,
-        w: &ArrayBase<R, D>,
-        h: &ArrayBase<R, D>,
-        gradient: &ArrayBase<R, D>,
-    ) -> ArrayBase<R, D>;
+    fn update_h(&self, w: &ArrayBase<R, D>, h: &mut ArrayBase<R, D>, v: &ArrayBase<R, D>);
 
-    fn update_w(
-        &self,
-        w: &ArrayBase<R, D>,
-        h: &ArrayBase<R, D>,
-        gradient: &ArrayBase<R, D>,
-    ) -> ArrayBase<R, D>;
+    fn update_w(&self, w: &mut ArrayBase<R, D>, h: &ArrayBase<R, D>, v: &ArrayBase<R, D>);
 }
 
-enum UpdateType {
-    Multiplicative,
-    Additive,
-}
+struct MultiplicativeEuclideanUpdates {}
 
-struct Updater<R: RawData, D: Dimension> {
-    update_type: UpdateType,
-    components: Vec<Box<dyn UpdateComponent<R, D>>>,
-}
-
-impl<R, D> Updater<R, D>
+impl<R, D> UpdateComponent<R, D> for MultiplicativeEuclideanUpdates
 where
     R: Data,
     D: Dimension,
     R::Elem: Zero + Clone,
-    ArrayBase<R, D>: MulAssign + AddAssign,
+    ArrayBase<R, D>: Dot<ArrayBase<R, D>, Output = ArrayBase<R, D>>,
 {
-    fn update(&self, w: &mut ArrayBase<R, D>, h: &mut ArrayBase<R, D>, gradient: &ArrayBase<R, D>) {
-        for component in &self.components {
-            let update_w = component.update_w(w, h, gradient);
-            let update_h = component.update_h(w, h, gradient);
-            match self.update_type {
-                UpdateType::Multiplicative => {
-                    *w *= update_w;
-                    *h *= update_h;
+    fn update_h(&self, w: &ArrayBase<R, D>, h: &mut ArrayBase<R, D>, v: &ArrayBase<R, D>) {}
+    fn update_w(&self, w: &mut ArrayBase<R, D>, h: &ArrayBase<R, D>, v: &ArrayBase<R, D>) {
+        let h_t = h.t();
+        for i in 0..w.shape()[0] {
+            for j in 0..w.shape()[1] {
+                let mut numerator = R::Elem::zero();
+                let mut denominator = R::Elem::zero();
+                for k in 0..h.shape()[1] {
+                    numerator += h_t[[k, j]] * v[[i, k]];
+                    denominator += h_t[[k, j]] * w[[i, k]].clone();
                 }
-                UpdateType::Additive => {
-                    *w += update_w;
-                    *h += update_h;
-                }
+                w[[i, j]] *= numerator / denominator;
             }
         }
     }
 }
 
-struct NmfBase<R: RawData, D: Dimension> {
+struct Updater<R: RawData, D: Dimension> {
+    components: Vec<Box<dyn UpdateComponent<R, D>>>,
+}
+
+impl<R, D> Updater<R, D>
+where
+    R: RawData,
+    D: Dimension,
+    R::Elem: Zero + Clone,
+    ArrayBase<R, D>: MulAssign + AddAssign,
+{
+    fn update(&self, w: &mut ArrayBase<R, D>, h: &mut ArrayBase<R, D>, v: &ArrayBase<R, D>) {
+        for component in &self.components {
+            component.update_w(w, h, v);
+            component.update_h(w, h, v);
+        }
+    }
+}
+
+struct Nmf<R: RawData, D: Dimension> {
     w: ArrayBase<R, D>,
     h: ArrayBase<R, D>,
+    v_target: ArrayBase<R, D>,
     loss: Loss<R, D>,
     updater: Updater<R, D>,
 }
 
-impl<R: RawData, D: Dimension> NmfBase<R, D> {
-    fn random_initialize(&mut self) {}
+impl<R, D> Nmf<R, D>
+where
+    R: RawData,
+    D: Dimension,
+    R::Elem: Zero + Clone,
+    ArrayBase<R, D>: MulAssign + AddAssign + Dot<ArrayBase<R, D>, Output = ArrayBase<R, D>>,
+{
+    fn set_w(&mut self, w: ArrayBase<R, D>) {
+        self.w = w;
+    }
+    fn set_h(&mut self, h: ArrayBase<R, D>) {
+        self.h = h;
+    }
     fn add_update_component(&mut self, component: Box<dyn UpdateComponent<R, D>>) {
         self.updater.components.push(component);
     }
-    fn add_loss_component(&mut self, component: Box<dyn LossComponent<R, D>>) {
-        self.loss.components.push(component);
+    fn step(&mut self) -> ArrayBase<R, D> {
+        let v = self.w.dot(&self.h);
+        self.updater.update(&mut self.w, &mut self.h, &v);
+        v
+    }
+    fn fit(&mut self, max_iter: usize, tol: f64) {
+        let mut loss = f64::INFINITY;
+        let mut v_guessed = self.step();
+        for _ in 1..max_iter {
+            loss = self
+                .loss
+                .compute(&self.w, &self.h, &v_guessed, &self.v_target);
+            if loss < tol {
+                break;
+            }
+            v_guessed = self.step();
+        }
     }
 }
 
-trait NmfComputer<R: RawData, D: Dimension> {
-    fn compute(&self, nmf: NmfBase<R, D>) -> ArrayBase<R, D>;
+struct Nmf2D<R: RawData> {
+    nmf: Nmf<R, Ix2>,
 }
 
 // TODO: modify
