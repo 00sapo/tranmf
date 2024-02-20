@@ -1,8 +1,13 @@
-use ndarray::{linalg::Dot, ArrayBase, Data, Dimension, Ix2, RawData};
+use ndarray::{linalg::Dot, ArrayBase, Data, DataMut, Dimension, Ix2, RawData};
 use num::{Signed, Zero};
 use pyo3::prelude::*;
 use std::iter::Sum;
-use std::ops::{AddAssign, Mul, MulAssign, Sub};
+use std::ops::{AddAssign, DivAssign, Mul, MulAssign, Sub, SubAssign};
+
+enum UpdateType {
+    Additive,
+    Multiplicative,
+}
 
 struct Loss<R: RawData, D: Dimension> {
     components: Vec<Box<dyn LossComponent<R, D>>>,
@@ -10,11 +15,58 @@ struct Loss<R: RawData, D: Dimension> {
 
 impl<R, D> Loss<R, D>
 where
-    R: RawData,
+    R: Data + DataMut,
     D: Dimension,
-    R::Elem: Zero + Clone,
+    R::Elem: Zero + Clone + AddAssign + SubAssign + MulAssign + DivAssign,
     ArrayBase<R, D>: AddAssign,
 {
+    /// sums the value of each component of the loss or of the updates
+    pub(self) fn _sum_of_components<F, T>(&self, compute_component_value: F) -> T
+    where
+        F: Fn(&Box<dyn LossComponent<R, D>>) -> T,
+        T: AddAssign,
+    {
+        let mut computed = self.components.iter().map(compute_component_value);
+        let mut sum = computed.next().unwrap();
+        computed.for_each(|c| sum += c);
+        sum
+    }
+
+    /// updates the matrix W or H using additive or multiplicative update rules
+    pub(self) fn _update_matrix<F, T>(
+        &self,
+        matrix: &mut ArrayBase<R, D>,
+        other1: &ArrayBase<R, D>,
+        other2: &ArrayBase<R, D>,
+        v: &ArrayBase<R, D>,
+        update_type: &UpdateType,
+        component_update_fn: F,
+        majorize: bool,
+    ) where
+        F: Fn(<D as Dimension>::Pattern) -> T,
+        T: Fn(&Box<dyn LossComponent<R, D>>) -> R::Elem,
+    {
+        matrix
+            .indexed_iter_mut()
+            .for_each(|(coordinates, elem)| match update_type {
+                UpdateType::Additive => {
+                    if majorize {
+                        *elem += self._sum_of_components(component_update_fn(coordinates));
+                    } else {
+                        *elem -= self._sum_of_components(component_update_fn(coordinates));
+                    }
+                }
+                UpdateType::Multiplicative => {
+                    if majorize {
+                        *elem *= self._sum_of_components(component_update_fn(coordinates));
+                    } else {
+                        *elem /= self._sum_of_components(component_update_fn(coordinates));
+                    }
+                }
+            });
+    }
+
+    /// computes the loss
     fn compute(
         &self,
         w: &ArrayBase<R, D>,
@@ -22,13 +74,78 @@ where
         v_guessed: &ArrayBase<R, D>,
         v_target: &ArrayBase<R, D>,
     ) -> f64 {
-        let mut computed = self
-            .components
-            .iter()
-            .map(|c| c.compute(w, h, v_guessed, v_target));
-        let mut sum = computed.next().unwrap();
-        computed.for_each(|c| sum += c);
-        sum
+        self._sum_of_components(|c| c.compute(w, h, v_guessed, v_target))
+    }
+
+    fn majorize_w(
+        &self,
+        w: &mut ArrayBase<R, D>,
+        h: &mut ArrayBase<R, D>,
+        v: &ArrayBase<R, D>,
+        update_type: &UpdateType,
+    ) {
+        self._update_matrix(
+            w,
+            h,
+            v,
+            update_type,
+            |coord| |c| c.majorize_w(coord, w, h, v),
+            true,
+        );
+    }
+
+    fn majorize_h(
+        &self,
+        w: &ArrayBase<R, D>,
+        h: &mut ArrayBase<R, D>,
+        v: &ArrayBase<R, D>,
+        update_type: &UpdateType,
+    ) {
+        self._update_matrix(
+            h,
+            w,
+            h,
+            v,
+            update_type,
+            |coord| |c| c.majorize_h(coord, w, h, v),
+            true,
+        );
+    }
+
+    fn minorize_w(
+        &self,
+        w: &mut ArrayBase<R, D>,
+        h: &ArrayBase<R, D>,
+        v: &ArrayBase<R, D>,
+        update_type: &UpdateType,
+    ) {
+        self._update_matrix(
+            w,
+            w,
+            h,
+            v,
+            update_type,
+            |coord| |c| c.minorize_w(coord, w, h, v),
+            false,
+        );
+    }
+
+    fn minorize_h(
+        &self,
+        w: &ArrayBase<R, D>,
+        h: &mut ArrayBase<R, D>,
+        v: &ArrayBase<R, D>,
+        update_type: &UpdateType,
+    ) {
+        self._update_matrix(
+            h,
+            w,
+            h,
+            v,
+            update_type,
+            |coord| |c| c.minorize_h(coord, w, h, v),
+            false,
+        );
     }
 }
 
@@ -41,6 +158,44 @@ trait LossComponent<R: RawData, D: Dimension> {
         v_guessed: &ArrayBase<R, D>,
         v_target: &ArrayBase<R, D>,
     ) -> f64;
+
+    /// This function will be used to increase each element of W during the update; usually it is
+    /// the sum of all the negative terms of the gradient in respect to an element of W.
+    /// the returned value is the sum of these terms, without the negative sign.
+    fn majorize_w(
+        &self,
+        coordinates: <D as Dimension>::Pattern,
+        w: &ArrayBase<R, D>,
+        h: &ArrayBase<R, D>,
+        v: &ArrayBase<R, D>,
+    ) -> R::Elem;
+
+    fn majorize_h(
+        &self,
+        coordinates: <D as Dimension>::Pattern,
+        w: &ArrayBase<R, D>,
+        h: &ArrayBase<R, D>,
+        v: &ArrayBase<R, D>,
+    ) -> R::Elem;
+
+    /// This function will be used to decrease each element of W during the update; usually it is
+    /// the sum of all the positive terms of the gradient in respect to an element of W.
+    /// the returned value is the sum of these terms, without the negative sign.
+    fn minorize_w(
+        &self,
+        coordinates: <D as Dimension>::Pattern,
+        w: &ArrayBase<R, D>,
+        h: &ArrayBase<R, D>,
+        v: &ArrayBase<R, D>,
+    ) -> R::Elem;
+
+    fn minorize_h(
+        &self,
+        coordinates: <D as Dimension>::Pattern,
+        w: &ArrayBase<R, D>,
+        h: &ArrayBase<R, D>,
+        v: &ArrayBase<R, D>,
+    ) -> R::Elem;
 }
 
 struct LossEuclidean;
@@ -66,55 +221,45 @@ where
             .sum::<f64>()
             / (v_guessed.len() as f64)
     }
-}
-trait UpdateComponent<R: RawData, D: Dimension> {
-    fn update_h(&self, w: &ArrayBase<R, D>, h: &mut ArrayBase<R, D>, v: &ArrayBase<R, D>);
 
-    fn update_w(&self, w: &mut ArrayBase<R, D>, h: &ArrayBase<R, D>, v: &ArrayBase<R, D>);
-}
-
-struct MultiplicativeEuclideanUpdates {}
-
-impl<R, D> UpdateComponent<R, D> for MultiplicativeEuclideanUpdates
-where
-    R: Data,
-    D: Dimension,
-    R::Elem: Zero + Clone,
-    ArrayBase<R, D>: Dot<ArrayBase<R, D>, Output = ArrayBase<R, D>>,
-{
-    fn update_h(&self, w: &ArrayBase<R, D>, h: &mut ArrayBase<R, D>, v: &ArrayBase<R, D>) {}
-    fn update_w(&self, w: &mut ArrayBase<R, D>, h: &ArrayBase<R, D>, v: &ArrayBase<R, D>) {
-        let h_t = h.t();
-        for i in 0..w.shape()[0] {
-            for j in 0..w.shape()[1] {
-                let mut numerator = R::Elem::zero();
-                let mut denominator = R::Elem::zero();
-                for k in 0..h.shape()[1] {
-                    numerator += h_t[[k, j]] * v[[i, k]];
-                    denominator += h_t[[k, j]] * w[[i, k]].clone();
-                }
-                w[[i, j]] *= numerator / denominator;
-            }
-        }
+    fn majorize_w(
+        &self,
+        coordinates: <D as Dimension>::Pattern,
+        w: &ArrayBase<R, D>,
+        h: &ArrayBase<R, D>,
+        v: &ArrayBase<R, D>,
+    ) -> <R as RawData>::Elem {
+        todo!()
     }
-}
 
-struct Updater<R: RawData, D: Dimension> {
-    components: Vec<Box<dyn UpdateComponent<R, D>>>,
-}
+    fn majorize_h(
+        &self,
+        coordinates: <D as Dimension>::Pattern,
+        w: &ArrayBase<R, D>,
+        h: &ArrayBase<R, D>,
+        v: &ArrayBase<R, D>,
+    ) -> <R as RawData>::Elem {
+        todo!()
+    }
 
-impl<R, D> Updater<R, D>
-where
-    R: RawData,
-    D: Dimension,
-    R::Elem: Zero + Clone,
-    ArrayBase<R, D>: MulAssign + AddAssign,
-{
-    fn update(&self, w: &mut ArrayBase<R, D>, h: &mut ArrayBase<R, D>, v: &ArrayBase<R, D>) {
-        for component in &self.components {
-            component.update_w(w, h, v);
-            component.update_h(w, h, v);
-        }
+    fn minorize_w(
+        &self,
+        coordinates: <D as Dimension>::Pattern,
+        w: &ArrayBase<R, D>,
+        h: &ArrayBase<R, D>,
+        v: &ArrayBase<R, D>,
+    ) -> <R as RawData>::Elem {
+        todo!()
+    }
+
+    fn minorize_h(
+        &self,
+        coordinates: <D as Dimension>::Pattern,
+        w: &ArrayBase<R, D>,
+        h: &ArrayBase<R, D>,
+        v: &ArrayBase<R, D>,
+    ) -> <R as RawData>::Elem {
+        todo!()
     }
 }
 
@@ -123,15 +268,16 @@ struct Nmf<R: RawData, D: Dimension> {
     h: ArrayBase<R, D>,
     v_target: ArrayBase<R, D>,
     loss: Loss<R, D>,
-    updater: Updater<R, D>,
+    update_type: UpdateType,
 }
 
 impl<R, D> Nmf<R, D>
 where
-    R: RawData,
+    R: DataMut,
     D: Dimension,
-    R::Elem: Zero + Clone,
-    ArrayBase<R, D>: MulAssign + AddAssign + Dot<ArrayBase<R, D>, Output = ArrayBase<R, D>>,
+    R::Elem: Zero + Clone + AddAssign + SubAssign + MulAssign + DivAssign,
+    ArrayBase<R, D>:
+        MulAssign + AddAssign + SubAssign + Dot<ArrayBase<R, D>, Output = ArrayBase<R, D>>,
 {
     fn set_w(&mut self, w: ArrayBase<R, D>) {
         self.w = w;
@@ -139,12 +285,10 @@ where
     fn set_h(&mut self, h: ArrayBase<R, D>) {
         self.h = h;
     }
-    fn add_update_component(&mut self, component: Box<dyn UpdateComponent<R, D>>) {
-        self.updater.components.push(component);
-    }
     fn step(&mut self) -> ArrayBase<R, D> {
         let v = self.w.dot(&self.h);
-        self.updater.update(&mut self.w, &mut self.h, &v);
+        self.loss
+            .majorize_w(&mut self.w, &self.h, &v, &self.update_type);
         v
     }
     fn fit(&mut self, max_iter: usize, tol: f64) {
