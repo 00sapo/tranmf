@@ -1,8 +1,11 @@
-use ndarray::{linalg::Dot, ArrayBase, Data, DataMut, Dimension, Ix2, RawData};
+use ndarray::{
+    linalg::Dot, ArrayBase, Data, DataMut, Dim, Dimension, Ix1, Ix2, Ix3, Ix4, Ix5, Ix6, IxDyn,
+    IxDynImpl, NdIndex, RawData,
+};
 use num::{Signed, Zero};
 use pyo3::prelude::*;
 use std::iter::Sum;
-use std::ops::{AddAssign, DivAssign, Mul, MulAssign, Sub, SubAssign};
+use std::ops::{AddAssign, DivAssign, IndexMut, Mul, MulAssign, Sub, SubAssign};
 
 enum UpdateType {
     Additive,
@@ -11,6 +14,18 @@ enum UpdateType {
 
 struct Loss<R: RawData, D: Dimension> {
     components: Vec<Box<dyn LossComponent<R, D>>>,
+}
+
+/// convert an index referred to the flattened array into a vector of indices
+/// only row-major order is supported (C)
+fn index_to_indices<D>(index: usize, shape: &[usize]) -> &[usize] {
+    let mut indices = vec![0; shape.len()];
+    let mut index = index;
+    for (i, &s) in shape.iter().enumerate().rev() {
+        indices[i] = index % s;
+        index /= s;
+    }
+    &indices
 }
 
 impl<R, D> Loss<R, D>
@@ -35,35 +50,34 @@ where
     /// updates the matrix W or H using additive or multiplicative update rules
     pub(self) fn _update_matrix<F, T>(
         &self,
-        matrix: &mut ArrayBase<R, D>,
-        other1: &ArrayBase<R, D>,
-        other2: &ArrayBase<R, D>,
-        v: &ArrayBase<R, D>,
+        array: &mut ArrayBase<R, D>,
         update_type: &UpdateType,
         component_update_fn: F,
         majorize: bool,
     ) where
-        F: Fn(<D as Dimension>::Pattern) -> T,
+        F: Fn(&D, &ArrayBase<R, D>) -> T,
         T: Fn(&Box<dyn LossComponent<R, D>>) -> R::Elem,
     {
-        matrix
-            .indexed_iter_mut()
-            .for_each(|(coordinates, elem)| match update_type {
+        for index in 0..array.len() {
+            let coordinates = index_to_indices(index, array.shape());
+            let update_value = self._sum_of_components(component_update_fn(&coordinates, &array));
+            match update_type {
                 UpdateType::Additive => {
                     if majorize {
-                        *elem += self._sum_of_components(component_update_fn(coordinates));
+                        array.get_mut(coordinates).map(|x| *x += update_value);
                     } else {
-                        *elem -= self._sum_of_components(component_update_fn(coordinates));
+                        array.get_mut(coordinates).map(|x| *x -= update_value);
                     }
                 }
                 UpdateType::Multiplicative => {
                     if majorize {
-                        *elem *= self._sum_of_components(component_update_fn(coordinates));
+                        array.get_mut(coordinates).map(|x| *x *= update_value);
                     } else {
-                        *elem /= self._sum_of_components(component_update_fn(coordinates));
+                        array.get_mut(coordinates).map(|x| *x /= update_value);
                     }
                 }
-            });
+            }
+        }
     }
 
     /// computes the loss
@@ -80,16 +94,14 @@ where
     fn majorize_w(
         &self,
         w: &mut ArrayBase<R, D>,
-        h: &mut ArrayBase<R, D>,
+        h: &ArrayBase<R, D>,
         v: &ArrayBase<R, D>,
         update_type: &UpdateType,
     ) {
         self._update_matrix(
             w,
-            h,
-            v,
             update_type,
-            |coord| |c| c.majorize_w(coord, w, h, v),
+            |coord, w_| |c| c.majorize_w(coord, w_, h, v),
             true,
         );
     }
@@ -103,11 +115,8 @@ where
     ) {
         self._update_matrix(
             h,
-            w,
-            h,
-            v,
             update_type,
-            |coord| |c| c.majorize_h(coord, w, h, v),
+            |coord, h_| |c| c.majorize_h(coord, w, h_, v),
             true,
         );
     }
@@ -121,11 +130,8 @@ where
     ) {
         self._update_matrix(
             w,
-            w,
-            h,
-            v,
             update_type,
-            |coord| |c| c.minorize_w(coord, w, h, v),
+            |coord, w_| |c| c.minorize_w(coord, w_, h, v),
             false,
         );
     }
@@ -139,11 +145,8 @@ where
     ) {
         self._update_matrix(
             h,
-            w,
-            h,
-            v,
             update_type,
-            |coord| |c| c.minorize_h(coord, w, h, v),
+            |coord, h_| |c| c.minorize_h(coord, w, h_, v),
             false,
         );
     }
@@ -164,7 +167,7 @@ trait LossComponent<R: RawData, D: Dimension> {
     /// the returned value is the sum of these terms, without the negative sign.
     fn majorize_w(
         &self,
-        coordinates: <D as Dimension>::Pattern,
+        coordinates: &Dim<IxDynImpl>,
         w: &ArrayBase<R, D>,
         h: &ArrayBase<R, D>,
         v: &ArrayBase<R, D>,
@@ -172,7 +175,7 @@ trait LossComponent<R: RawData, D: Dimension> {
 
     fn majorize_h(
         &self,
-        coordinates: <D as Dimension>::Pattern,
+        coordinates: &Dim<IxDynImpl>,
         w: &ArrayBase<R, D>,
         h: &ArrayBase<R, D>,
         v: &ArrayBase<R, D>,
@@ -183,7 +186,7 @@ trait LossComponent<R: RawData, D: Dimension> {
     /// the returned value is the sum of these terms, without the negative sign.
     fn minorize_w(
         &self,
-        coordinates: <D as Dimension>::Pattern,
+        coordinates: &Dim<IxDynImpl>,
         w: &ArrayBase<R, D>,
         h: &ArrayBase<R, D>,
         v: &ArrayBase<R, D>,
@@ -191,7 +194,7 @@ trait LossComponent<R: RawData, D: Dimension> {
 
     fn minorize_h(
         &self,
-        coordinates: <D as Dimension>::Pattern,
+        coordinates: &Dim<IxDynImpl>,
         w: &ArrayBase<R, D>,
         h: &ArrayBase<R, D>,
         v: &ArrayBase<R, D>,
@@ -224,7 +227,7 @@ where
 
     fn majorize_w(
         &self,
-        coordinates: <D as Dimension>::Pattern,
+        coordinates: &Dim<IxDynImpl>,
         w: &ArrayBase<R, D>,
         h: &ArrayBase<R, D>,
         v: &ArrayBase<R, D>,
@@ -234,7 +237,7 @@ where
 
     fn majorize_h(
         &self,
-        coordinates: <D as Dimension>::Pattern,
+        coordinates: &Dim<IxDynImpl>,
         w: &ArrayBase<R, D>,
         h: &ArrayBase<R, D>,
         v: &ArrayBase<R, D>,
@@ -244,7 +247,7 @@ where
 
     fn minorize_w(
         &self,
-        coordinates: <D as Dimension>::Pattern,
+        coordinates: &Dim<IxDynImpl>,
         w: &ArrayBase<R, D>,
         h: &ArrayBase<R, D>,
         v: &ArrayBase<R, D>,
@@ -254,7 +257,7 @@ where
 
     fn minorize_h(
         &self,
-        coordinates: <D as Dimension>::Pattern,
+        coordinates: &Dim<IxDynImpl>,
         w: &ArrayBase<R, D>,
         h: &ArrayBase<R, D>,
         v: &ArrayBase<R, D>,
