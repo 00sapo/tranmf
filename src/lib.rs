@@ -53,19 +53,19 @@ where
     }
 
     /// updates the matrix W or H using additive or multiplicative update rules
-    pub(self) fn _update_matrix<F, T>(
+    pub(self) fn _update_matrix<F>(
         &self,
         array: &mut ArrayBase<R, D>,
         update_type: &UpdateType,
         component_update_fn: F,
         majorize: bool,
     ) where
-        F: Fn(&D, &ArrayBase<R, D>) -> T,
-        T: Fn(&Box<dyn LossComponent<R, D>>) -> R::Elem,
+        F: Fn(&D, &ArrayBase<R, D>, &Box<dyn LossComponent<R, D>>) -> R::Elem,
     {
         for index in 0..array.len() {
             let coordinates = index_to_indices::<D>(index, array.shape());
-            let update_value = self._sum_of_components(component_update_fn(&coordinates, &array));
+            let update_value =
+                self._sum_of_components(|c| component_update_fn(&coordinates, array, c));
             match update_type {
                 UpdateType::Additive => {
                     if majorize {
@@ -106,7 +106,7 @@ where
         self._update_matrix(
             w,
             update_type,
-            |coord, w_| |c| c.majorize_w(coord, w_, h, v),
+            |coord, w_, c| c.majorize_w(coord, w_, h, v),
             true,
         );
     }
@@ -121,7 +121,7 @@ where
         self._update_matrix(
             h,
             update_type,
-            |coord, h_| |c| c.majorize_h(coord, w, h_, v),
+            |coord, h_, c| c.majorize_h(coord, w, h_, v),
             true,
         );
     }
@@ -136,7 +136,7 @@ where
         self._update_matrix(
             w,
             update_type,
-            |coord, w_| |c| c.minorize_w(coord, w_, h, v),
+            |coord, w_, c| c.minorize_w(coord, w_, h, v),
             false,
         );
     }
@@ -151,7 +151,7 @@ where
         self._update_matrix(
             h,
             update_type,
-            |coord, h_| |c| c.minorize_h(coord, w, h_, v),
+            |coord, h_, c| c.minorize_h(coord, w, h_, v),
             false,
         );
     }
