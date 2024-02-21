@@ -278,6 +278,8 @@ struct Nmf<R: RawData, D: Dimension> {
     v_target: ArrayBase<R, D>,
     loss: Loss<R, D>,
     update_type: UpdateType,
+    fix_w: bool,
+    fix_h: bool,
 }
 
 impl<R, D> Nmf<R, D>
@@ -294,10 +296,34 @@ where
     fn set_h(&mut self, h: ArrayBase<R, D>) {
         self.h = h;
     }
+    fn freeze_w(&mut self) {
+        self.fix_w = true;
+    }
+    fn freeze_h(&mut self) {
+        self.fix_h = true;
+    }
+    fn free_w(&mut self) {
+        self.fix_w = false;
+    }
+    fn free_h(&mut self) {
+        self.fix_h = false;
+    }
     fn step(&mut self) -> ArrayBase<R, D> {
         let v = self.w.dot(&self.h);
-        self.loss
-            .majorize_w(&mut self.w, &self.h, &v, &self.update_type);
+
+        if !self.fix_w {
+            self.loss
+                .majorize_w(&mut self.w, &self.h, &v, &self.update_type);
+            self.loss
+                .minorize_w(&mut self.w, &self.h, &v, &self.update_type);
+        }
+
+        if !self.fix_h {
+            self.loss
+                .majorize_h(&self.w, &mut self.h, &v, &self.update_type);
+            self.loss
+                .minorize_h(&self.w, &mut self.h, &v, &self.update_type);
+        }
         v
     }
     fn fit(&mut self, max_iter: usize, tol: f64) {
@@ -313,10 +339,6 @@ where
             v_guessed = self.step();
         }
     }
-}
-
-struct Nmf2D<R: RawData> {
-    nmf: Nmf<R, Ix2>,
 }
 
 // TODO: modify
