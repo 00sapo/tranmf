@@ -1,11 +1,8 @@
-use ndarray::{
-    linalg::Dot, ArrayBase, Data, DataMut, Dim, Dimension, Ix1, Ix2, Ix3, Ix4, Ix5, Ix6, IxDyn,
-    IxDynImpl, NdIndex, RawData,
-};
+use ndarray::{linalg::Dot, ArrayBase, Data, DataMut, Dimension, Ix2, RawData};
 use num::{Signed, Zero};
 use pyo3::prelude::*;
 use std::iter::Sum;
-use std::ops::{AddAssign, DivAssign, IndexMut, Mul, MulAssign, Sub, SubAssign};
+use std::ops::{AddAssign, DivAssign, Mul, MulAssign, Sub, SubAssign};
 
 enum UpdateType {
     Additive,
@@ -18,14 +15,22 @@ struct Loss<R: RawData, D: Dimension> {
 
 /// convert an index referred to the flattened array into a vector of indices
 /// only row-major order is supported (C)
-fn index_to_indices<D>(index: usize, shape: &[usize]) -> &[usize] {
-    let mut indices = vec![0; shape.len()];
+fn index_to_indices<D>(index: usize, shape: &[usize]) -> D
+where
+    D: Dimension,
+{
+    let ndim = shape.len();
+    // NDIM is None for dynamic dimension, so any shape is ok in that case
+    if D::NDIM.unwrap_or(ndim) != ndim {
+        panic!("Dimension mismatch");
+    }
+    let mut indices = D::zeros(ndim);
     let mut index = index;
     for (i, &s) in shape.iter().enumerate().rev() {
         indices[i] = index % s;
         index /= s;
     }
-    &indices
+    indices
 }
 
 impl<R, D> Loss<R, D>
@@ -59,21 +64,21 @@ where
         T: Fn(&Box<dyn LossComponent<R, D>>) -> R::Elem,
     {
         for index in 0..array.len() {
-            let coordinates = index_to_indices(index, array.shape());
+            let coordinates = index_to_indices::<D>(index, array.shape());
             let update_value = self._sum_of_components(component_update_fn(&coordinates, &array));
             match update_type {
                 UpdateType::Additive => {
                     if majorize {
-                        array.get_mut(coordinates).map(|x| *x += update_value);
+                        *array.get_mut(coordinates).unwrap() += update_value;
                     } else {
-                        array.get_mut(coordinates).map(|x| *x -= update_value);
+                        *array.get_mut(coordinates).unwrap() -= update_value;
                     }
                 }
                 UpdateType::Multiplicative => {
                     if majorize {
-                        array.get_mut(coordinates).map(|x| *x *= update_value);
+                        *array.get_mut(coordinates).unwrap() *= update_value;
                     } else {
-                        array.get_mut(coordinates).map(|x| *x /= update_value);
+                        *array.get_mut(coordinates).unwrap() /= update_value;
                     }
                 }
             }
@@ -167,7 +172,7 @@ trait LossComponent<R: RawData, D: Dimension> {
     /// the returned value is the sum of these terms, without the negative sign.
     fn majorize_w(
         &self,
-        coordinates: &Dim<IxDynImpl>,
+        coordinates: &D,
         w: &ArrayBase<R, D>,
         h: &ArrayBase<R, D>,
         v: &ArrayBase<R, D>,
@@ -175,7 +180,7 @@ trait LossComponent<R: RawData, D: Dimension> {
 
     fn majorize_h(
         &self,
-        coordinates: &Dim<IxDynImpl>,
+        coordinates: &D,
         w: &ArrayBase<R, D>,
         h: &ArrayBase<R, D>,
         v: &ArrayBase<R, D>,
@@ -186,7 +191,7 @@ trait LossComponent<R: RawData, D: Dimension> {
     /// the returned value is the sum of these terms, without the negative sign.
     fn minorize_w(
         &self,
-        coordinates: &Dim<IxDynImpl>,
+        coordinates: &D,
         w: &ArrayBase<R, D>,
         h: &ArrayBase<R, D>,
         v: &ArrayBase<R, D>,
@@ -194,7 +199,7 @@ trait LossComponent<R: RawData, D: Dimension> {
 
     fn minorize_h(
         &self,
-        coordinates: &Dim<IxDynImpl>,
+        coordinates: &D,
         w: &ArrayBase<R, D>,
         h: &ArrayBase<R, D>,
         v: &ArrayBase<R, D>,
@@ -203,6 +208,7 @@ trait LossComponent<R: RawData, D: Dimension> {
 
 struct LossEuclidean;
 
+#[allow(unused_variables)]
 impl<R, D> LossComponent<R, D> for LossEuclidean
 where
     D: Dimension,
@@ -227,7 +233,7 @@ where
 
     fn majorize_w(
         &self,
-        coordinates: &Dim<IxDynImpl>,
+        coordinates: &D,
         w: &ArrayBase<R, D>,
         h: &ArrayBase<R, D>,
         v: &ArrayBase<R, D>,
@@ -237,7 +243,7 @@ where
 
     fn majorize_h(
         &self,
-        coordinates: &Dim<IxDynImpl>,
+        coordinates: &D,
         w: &ArrayBase<R, D>,
         h: &ArrayBase<R, D>,
         v: &ArrayBase<R, D>,
@@ -247,7 +253,7 @@ where
 
     fn minorize_w(
         &self,
-        coordinates: &Dim<IxDynImpl>,
+        coordinates: &D,
         w: &ArrayBase<R, D>,
         h: &ArrayBase<R, D>,
         v: &ArrayBase<R, D>,
@@ -257,7 +263,7 @@ where
 
     fn minorize_h(
         &self,
-        coordinates: &Dim<IxDynImpl>,
+        coordinates: &D,
         w: &ArrayBase<R, D>,
         h: &ArrayBase<R, D>,
         v: &ArrayBase<R, D>,
