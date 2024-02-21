@@ -175,3 +175,4 @@ tests/output
 # already existing elements were commented out
 
 #/target
+.vscode
