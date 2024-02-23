@@ -1,16 +1,14 @@
-use ndarray::{linalg::Dot, ArrayBase, Data, DataMut, Dimension, Ix2, RawData};
+use ndarray::{
+    indices_of, linalg::Dot, ArrayBase, Data, DataMut, Dimension, Ix2, RawData, RawDataClone, Zip,
+};
 use num::{Signed, Zero};
 use pyo3::prelude::*;
 use std::iter::Sum;
-use std::ops::{AddAssign, DivAssign, Mul, MulAssign, Sub, SubAssign};
+use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Sub, SubAssign};
 
 enum UpdateType {
     Additive,
     Multiplicative,
-}
-
-struct Loss<R: RawData, D: Dimension> {
-    components: Vec<Box<dyn LossComponent<R, D>>>,
 }
 
 /// convert an index referred to the flattened array into a vector of indices
@@ -33,12 +31,17 @@ where
     indices
 }
 
+struct Loss<R: RawData, D: Dimension> {
+    components: Vec<Box<dyn LossComponent<R, D>>>,
+}
+
 impl<R, D> Loss<R, D>
 where
-    R: Data + DataMut,
-    D: Dimension,
-    R::Elem: Zero + Clone + AddAssign + SubAssign + MulAssign + DivAssign,
-    ArrayBase<R, D>: AddAssign,
+    R: Data + DataMut + RawDataClone + Sync,
+    D: Dimension + Copy,
+    D::Pattern: Send,
+    R::Elem: Zero + Clone + Add + AddAssign + Sub + Div + Mul + Sync + Send,
+    ArrayBase<R, D>: AddAssign + Sync + Send,
 {
     /// sums the value of each component of the loss or of the updates
     pub(self) fn _sum_of_components<F, T>(&self, compute_component_value: F) -> T
@@ -55,34 +58,38 @@ where
     /// updates the matrix W or H using additive or multiplicative update rules
     pub(self) fn _update_matrix<F>(
         &self,
-        array: &mut ArrayBase<R, D>,
+        array: &ArrayBase<R, D>,
         update_type: &UpdateType,
         component_update_fn: F,
         majorize: bool,
     ) where
-        F: Fn(&D, &ArrayBase<R, D>, &Box<dyn LossComponent<R, D>>) -> R::Elem,
+        F: Fn(&D, &ArrayBase<R, D>, &Box<dyn LossComponent<R, D>>) -> R::Elem + Sync,
     {
-        for index in 0..array.len() {
-            let coordinates = index_to_indices::<D>(index, array.shape());
-            let update_value =
-                self._sum_of_components(|c| component_update_fn(&coordinates, array, c));
-            match update_type {
-                UpdateType::Additive => {
-                    if majorize {
-                        *array.get_mut(coordinates).unwrap() += update_value;
-                    } else {
-                        *array.get_mut(coordinates).unwrap() -= update_value;
+        let array_ = array.clone();
+        Zip::from(array).and(indices_of(array)).par_map_assign_into(
+            array_,
+            |&element, coordinates| {
+                // let coordinates = index_to_indices::<D>(index, array.shape());
+                let update_value =
+                    self._sum_of_components(|c| component_update_fn(&coordinates, &array_, c));
+                match update_type {
+                    UpdateType::Additive => {
+                        if majorize {
+                            element + update_value
+                        } else {
+                            element - update_value
+                        }
+                    }
+                    UpdateType::Multiplicative => {
+                        if majorize {
+                            element * update_value
+                        } else {
+                            element / update_value
+                        }
                     }
                 }
-                UpdateType::Multiplicative => {
-                    if majorize {
-                        *array.get_mut(coordinates).unwrap() *= update_value;
-                    } else {
-                        *array.get_mut(coordinates).unwrap() /= update_value;
-                    }
-                }
-            }
-        }
+            },
+        );
     }
 
     /// computes the loss
@@ -158,7 +165,11 @@ where
 }
 
 /// a Component of the loss; components will be summed; only used for checking tolerance.
-trait LossComponent<R: RawData, D: Dimension> {
+trait LossComponent<R, D>: Sync
+where
+    R: RawData,
+    D: Dimension,
+{
     fn compute(
         &self,
         w: &ArrayBase<R, D>,
@@ -206,22 +217,20 @@ trait LossComponent<R: RawData, D: Dimension> {
     ) -> R::Elem;
 }
 
-struct LossEuclidean;
+struct EuclideanLoss2D;
 
-#[allow(unused_variables)]
-impl<R, D> LossComponent<R, D> for LossEuclidean
+impl<R> LossComponent<R, Ix2> for EuclideanLoss2D
 where
-    D: Dimension,
     R: Data,
-    R::Elem: Sub<Output = R::Elem> + Mul<Output = R::Elem> + Signed + Copy,
+    R::Elem: Sub<Output = R::Elem> + Mul<Output = R::Elem> + AddAssign + Signed + Copy,
     f64: Sum<R::Elem>,
 {
     fn compute(
         &self,
-        _w: &ArrayBase<R, D>,
-        _h: &ArrayBase<R, D>,
-        v_guessed: &ArrayBase<R, D>,
-        v_target: &ArrayBase<R, D>,
+        _w: &ArrayBase<R, Ix2>,
+        _h: &ArrayBase<R, Ix2>,
+        v_guessed: &ArrayBase<R, Ix2>,
+        v_target: &ArrayBase<R, Ix2>,
     ) -> f64 {
         v_guessed
             .iter()
@@ -233,42 +242,81 @@ where
 
     fn majorize_w(
         &self,
-        coordinates: &D,
-        w: &ArrayBase<R, D>,
-        h: &ArrayBase<R, D>,
-        v: &ArrayBase<R, D>,
+        coordinates: &Ix2,
+        _w: &ArrayBase<R, Ix2>,
+        h: &ArrayBase<R, Ix2>,
+        v: &ArrayBase<R, Ix2>,
     ) -> <R as RawData>::Elem {
-        todo!()
+        // (VH)_ij = (\sum_k(V_ik*H_kj))_ij
+        // (VH^T)_ij =
+        let mut sum = R::Elem::zero();
+        let i = coordinates[0];
+        let j = coordinates[1];
+        for k in 0..h.shape()[1] {
+            sum += v[[i, k]] * h[[j, k]];
+        }
+        sum
     }
 
     fn majorize_h(
         &self,
-        coordinates: &D,
-        w: &ArrayBase<R, D>,
-        h: &ArrayBase<R, D>,
-        v: &ArrayBase<R, D>,
+        coordinates: &Ix2,
+        w: &ArrayBase<R, Ix2>,
+        _h: &ArrayBase<R, Ix2>,
+        v: &ArrayBase<R, Ix2>,
     ) -> <R as RawData>::Elem {
-        todo!()
+        // (W^TV)_ij
+        let mut sum = R::Elem::zero();
+        let i = coordinates[0];
+        let j = coordinates[1];
+        for k in 0..w.shape()[0] {
+            sum += w[[k, i]] * v[[k, j]];
+        }
+        sum
     }
 
     fn minorize_w(
         &self,
-        coordinates: &D,
-        w: &ArrayBase<R, D>,
-        h: &ArrayBase<R, D>,
-        v: &ArrayBase<R, D>,
+        coordinates: &Ix2,
+        w: &ArrayBase<R, Ix2>,
+        h: &ArrayBase<R, Ix2>,
+        _v: &ArrayBase<R, Ix2>,
     ) -> <R as RawData>::Elem {
-        todo!()
+        // (W^TWH)_ij = ((W^TW)H)_ij = (\sum_k((W^TW)_ik*H_kj))_ij =
+        // = (\sum_k(\sum_l(W_li*W_lk)*H_kj))_ij
+        let mut sum = R::Elem::zero();
+        let i = coordinates[0];
+        let j = coordinates[1];
+        for k in 0..w.shape()[0] {
+            let mut w_sum = R::Elem::zero();
+            for l in 0..w.shape()[1] {
+                w_sum += w[[l, i]] * w[[l, k]];
+            }
+            sum += w_sum * h[[k, j]];
+        }
+        sum
     }
 
     fn minorize_h(
         &self,
-        coordinates: &D,
-        w: &ArrayBase<R, D>,
-        h: &ArrayBase<R, D>,
-        v: &ArrayBase<R, D>,
+        coordinates: &Ix2,
+        w: &ArrayBase<R, Ix2>,
+        h: &ArrayBase<R, Ix2>,
+        _v: &ArrayBase<R, Ix2>,
     ) -> <R as RawData>::Elem {
-        todo!()
+        // WHH^T)_ij = (W(HH^T))_ij = (\sum_k(W_ik*(HH^T)_kj))_ij =
+        // = (\sum_k(W_ik*\sum_l(H_kl*H_jl)))_ij
+        let mut sum = R::Elem::zero();
+        let i = coordinates[0];
+        let j = coordinates[1];
+        for k in 0..h.shape()[1] {
+            let mut h_sum = R::Elem::zero();
+            for l in 0..h.shape()[0] {
+                h_sum += h[[k, l]] * h[[j, l]];
+            }
+            sum += w[[i, k]] * h_sum;
+        }
+        sum
     }
 }
 
@@ -284,11 +332,15 @@ struct Nmf<R: RawData, D: Dimension> {
 
 impl<R, D> Nmf<R, D>
 where
-    R: DataMut,
+    R: RawDataClone + DataMut + Sync,
     D: Dimension,
     R::Elem: Zero + Clone + AddAssign + SubAssign + MulAssign + DivAssign,
-    ArrayBase<R, D>:
-        MulAssign + AddAssign + SubAssign + Dot<ArrayBase<R, D>, Output = ArrayBase<R, D>>,
+    ArrayBase<R, D>: MulAssign
+        + AddAssign
+        + SubAssign
+        + Dot<ArrayBase<R, D>, Output = ArrayBase<R, D>>
+        + Sync
+        + Send,
 {
     fn set_w(&mut self, w: ArrayBase<R, D>) {
         self.w = w;
@@ -327,10 +379,9 @@ where
         v
     }
     fn fit(&mut self, max_iter: usize, tol: f64) {
-        let mut loss = f64::INFINITY;
         let mut v_guessed = self.step();
         for _ in 1..max_iter {
-            loss = self
+            let loss = self
                 .loss
                 .compute(&self.w, &self.h, &v_guessed, &self.v_target);
             if loss < tol {
@@ -339,6 +390,13 @@ where
             v_guessed = self.step();
         }
     }
+}
+
+fn set_threads(n: usize) {
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(n)
+        .build_global()
+        .unwrap();
 }
 
 // TODO: modify
