@@ -1,34 +1,33 @@
 use ndarray::{
-    indices_of, linalg::Dot, ArrayBase, Data, DataMut, Dimension, Ix2, RawData, RawDataClone, Zip,
+    indices_of, linalg::Dot, ArrayBase, Data, DataMut, Dimension, IntoDimension, Ix2, NdProducer,
+    RawData, RawDataClone, Zip,
 };
 use num::{Signed, Zero};
 use pyo3::prelude::*;
 use std::iter::Sum;
-use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Sub, SubAssign};
+use std::ops::{Add, AddAssign, Div, Mul, MulAssign, Sub, SubAssign};
+
+trait Elem<R: RawData<Elem = Self>>: // Make sure R::Elem is Self
+    Zero
+    + Clone
+    + Signed
+    + Add<Output = Self>
+    + AddAssign
+    + Sub<Output = Self>
+    + SubAssign
+    + Mul<Output = Self>
+    + Div<Output = Self>
+    + Copy
+    + Sync
+    + Send
+    where
+        Self: Sized, // Added to assist in satisfying Sized constraints
+{
+}
 
 enum UpdateType {
     Additive,
     Multiplicative,
-}
-
-/// convert an index referred to the flattened array into a vector of indices
-/// only row-major order is supported (C)
-fn index_to_indices<D>(index: usize, shape: &[usize]) -> D
-where
-    D: Dimension,
-{
-    let ndim = shape.len();
-    // NDIM is None for dynamic dimension, so any shape is ok in that case
-    if D::NDIM.unwrap_or(ndim) != ndim {
-        panic!("Dimension mismatch");
-    }
-    let mut indices = D::zeros(ndim);
-    let mut index = index;
-    for (i, &s) in shape.iter().enumerate().rev() {
-        indices[i] = index % s;
-        index /= s;
-    }
-    indices
 }
 
 struct Loss<R: RawData, D: Dimension> {
@@ -40,8 +39,8 @@ where
     R: Data + DataMut + RawDataClone + Sync,
     D: Dimension + Copy,
     D::Pattern: Send,
-    R::Elem: Zero + Clone + Add + AddAssign + Sub + Div + Mul + Sync + Send,
-    ArrayBase<R, D>: AddAssign + Sync + Send,
+    R::Elem: Elem<R>,
+    ArrayBase<R, D>: AddAssign + Sync + Send + NdProducer,
 {
     /// sums the value of each component of the loss or of the updates
     pub(self) fn _sum_of_components<F, T>(&self, compute_component_value: F) -> T
@@ -58,6 +57,7 @@ where
     /// updates the matrix W or H using additive or multiplicative update rules
     pub(self) fn _update_matrix<F>(
         &self,
+        output: &mut ArrayBase<R, D>,
         array: &ArrayBase<R, D>,
         update_type: &UpdateType,
         component_update_fn: F,
@@ -65,13 +65,13 @@ where
     ) where
         F: Fn(&D, &ArrayBase<R, D>, &Box<dyn LossComponent<R, D>>) -> R::Elem + Sync,
     {
-        let array_ = array.clone();
-        Zip::from(array).and(indices_of(array)).par_map_assign_into(
-            array_,
-            |&element, coordinates| {
+        // use a Zip because it supports rayon's par_map_assign_into
+        Zip::from(array.view())
+            .and(indices_of(array))
+            .par_map_assign_into(output, |&element, coordinates| {
                 // let coordinates = index_to_indices::<D>(index, array.shape());
-                let update_value =
-                    self._sum_of_components(|c| component_update_fn(&coordinates, &array_, c));
+                let cc = coordinates.into_dimension();
+                let update_value = self._sum_of_components(|c| component_update_fn(&cc, &array, c));
                 match update_type {
                     UpdateType::Additive => {
                         if majorize {
@@ -88,8 +88,7 @@ where
                         }
                     }
                 }
-            },
-        );
+            });
     }
 
     /// computes the loss
@@ -105,27 +104,31 @@ where
 
     fn majorize_w(
         &self,
-        w: &mut ArrayBase<R, D>,
+        output: &mut ArrayBase<R, D>,
+        w: &ArrayBase<R, D>,
         h: &ArrayBase<R, D>,
         v: &ArrayBase<R, D>,
         update_type: &UpdateType,
     ) {
         self._update_matrix(
+            output,
             w,
             update_type,
             |coord, w_, c| c.majorize_w(coord, w_, h, v),
             true,
-        );
+        )
     }
 
     fn majorize_h(
         &self,
+        output: &mut ArrayBase<R, D>,
         w: &ArrayBase<R, D>,
-        h: &mut ArrayBase<R, D>,
+        h: &ArrayBase<R, D>,
         v: &ArrayBase<R, D>,
         update_type: &UpdateType,
     ) {
         self._update_matrix(
+            output,
             h,
             update_type,
             |coord, h_, c| c.majorize_h(coord, w, h_, v),
@@ -135,12 +138,14 @@ where
 
     fn minorize_w(
         &self,
-        w: &mut ArrayBase<R, D>,
+        output: &mut ArrayBase<R, D>,
+        w: &ArrayBase<R, D>,
         h: &ArrayBase<R, D>,
         v: &ArrayBase<R, D>,
         update_type: &UpdateType,
     ) {
         self._update_matrix(
+            output,
             w,
             update_type,
             |coord, w_, c| c.minorize_w(coord, w_, h, v),
@@ -150,12 +155,14 @@ where
 
     fn minorize_h(
         &self,
+        output: &mut ArrayBase<R, D>,
         w: &ArrayBase<R, D>,
-        h: &mut ArrayBase<R, D>,
+        h: &ArrayBase<R, D>,
         v: &ArrayBase<R, D>,
         update_type: &UpdateType,
     ) {
         self._update_matrix(
+            output,
             h,
             update_type,
             |coord, h_, c| c.minorize_h(coord, w, h_, v),
@@ -219,11 +226,12 @@ where
 
 struct EuclideanLoss2D;
 
-impl<R> LossComponent<R, Ix2> for EuclideanLoss2D
+impl<'a, R> LossComponent<R, Ix2> for EuclideanLoss2D
 where
     R: Data,
-    R::Elem: Sub<Output = R::Elem> + Mul<Output = R::Elem> + AddAssign + Signed + Copy,
-    f64: Sum<R::Elem>,
+    R::Elem: Elem<R> + 'a,
+    f64: std::iter::Sum<<R as ndarray::RawData>::Elem>,
+    &'a R::Elem: Sub<&'a R::Elem, Output = R::Elem>,
 {
     fn compute(
         &self,
@@ -333,12 +341,14 @@ struct Nmf<R: RawData, D: Dimension> {
 impl<R, D> Nmf<R, D>
 where
     R: RawDataClone + DataMut + Sync,
-    D: Dimension,
-    R::Elem: Zero + Clone + AddAssign + SubAssign + MulAssign + DivAssign,
+    R::Elem: Elem<R>,
+    D: Dimension + Copy,
+    D::Pattern: Send,
     ArrayBase<R, D>: MulAssign
         + AddAssign
         + SubAssign
         + Dot<ArrayBase<R, D>, Output = ArrayBase<R, D>>
+        + NdProducer
         + Sync
         + Send,
 {
@@ -364,17 +374,21 @@ where
         let v = self.w.dot(&self.h);
 
         if !self.fix_w {
+            let mut new_w = self.w.clone();
             self.loss
-                .majorize_w(&mut self.w, &self.h, &v, &self.update_type);
+                .majorize_w(&mut new_w, &self.w, &self.h, &v, &self.update_type);
             self.loss
-                .minorize_w(&mut self.w, &self.h, &v, &self.update_type);
+                .minorize_w(&mut new_w, &self.w, &self.h, &v, &self.update_type);
+            self.w = new_w;
         }
 
         if !self.fix_h {
+            let mut new_h = self.h.clone();
             self.loss
-                .majorize_h(&self.w, &mut self.h, &v, &self.update_type);
+                .majorize_h(&mut new_h, &self.w, &self.h, &v, &self.update_type);
             self.loss
-                .minorize_h(&self.w, &mut self.h, &v, &self.update_type);
+                .minorize_h(&mut new_h, &self.w, &self.h, &v, &self.update_type);
+            self.h = new_h;
         }
         v
     }
