@@ -2,26 +2,24 @@ use ndarray::{
     indices_of, linalg::Dot, ArrayBase, Data, DataMut, Dimension, IntoDimension, Ix2, NdProducer,
     RawData, RawDataClone, Zip,
 };
-use num::{Signed, Zero};
+use num::{Num, Signed, Zero};
 use pyo3::prelude::*;
-use std::iter::Sum;
 use std::ops::{Add, AddAssign, Div, Mul, MulAssign, Sub, SubAssign};
 
 trait Elem<R: RawData<Elem = Self>>: // Make sure R::Elem is Self
     Zero
     + Clone
     + Signed
-    + Add<Output = Self>
+    + Add<Self, Output = Self>
     + AddAssign
-    + Sub<Output = Self>
+    + Sub<Self, Output = Self>
     + SubAssign
-    + Mul<Output = Self>
-    + Div<Output = Self>
-    + Copy
+    + Mul<Self, Output = Self>
+    + Div<Self, Output = Self>
+    + Num
     + Sync
     + Send
-    where
-        Self: Sized, // Added to assist in satisfying Sized constraints
+    + Sized
 {
 }
 
@@ -41,6 +39,10 @@ where
     D::Pattern: Send,
     R::Elem: Elem<R>,
     ArrayBase<R, D>: AddAssign + Sync + Send + NdProducer,
+    for<'a> &'a R::Elem: Add<&'a R::Elem, Output = R::Elem>
+        + Sub<&'a R::Elem, Output = R::Elem>
+        + Mul<&'a R::Elem, Output = R::Elem>
+        + Div<&'a R::Elem, Output = R::Elem>,
 {
     /// sums the value of each component of the loss or of the updates
     pub(self) fn _sum_of_components<F, T>(&self, compute_component_value: F) -> T
@@ -63,15 +65,16 @@ where
         component_update_fn: F,
         majorize: bool,
     ) where
-        F: Fn(&D, &ArrayBase<R, D>, &Box<dyn LossComponent<R, D>>) -> R::Elem + Sync,
+        F: Fn(&D, &ArrayBase<R, D>, &Box<dyn LossComponent<R, D>>) -> R::Elem + Sync + Send,
     {
         // use a Zip because it supports rayon's par_map_assign_into
         Zip::from(array.view())
             .and(indices_of(array))
-            .par_map_assign_into(output, |&element, coordinates| {
+            .par_map_assign_into(output, move |element, coordinates| {
                 // let coordinates = index_to_indices::<D>(index, array.shape());
                 let cc = coordinates.into_dimension();
-                let update_value = self._sum_of_components(|c| component_update_fn(&cc, &array, c));
+                let update_value =
+                    &self._sum_of_components(|c| component_update_fn(&cc, &array, c));
                 match update_type {
                     UpdateType::Additive => {
                         if majorize {
@@ -226,12 +229,15 @@ where
 
 struct EuclideanLoss2D;
 
-impl<'a, R> LossComponent<R, Ix2> for EuclideanLoss2D
+impl<R> LossComponent<R, Ix2> for EuclideanLoss2D
 where
     R: Data,
-    R::Elem: Elem<R> + 'a,
+    R::Elem: Elem<R>,
     f64: std::iter::Sum<<R as ndarray::RawData>::Elem>,
-    &'a R::Elem: Sub<&'a R::Elem, Output = R::Elem>,
+    for<'a> &'a R::Elem: Add<&'a R::Elem, Output = R::Elem>
+        + Sub<&'a R::Elem, Output = R::Elem>
+        + Mul<&'a R::Elem, Output = R::Elem>
+        + Div<&'a R::Elem, Output = R::Elem>,
 {
     fn compute(
         &self,
@@ -243,7 +249,7 @@ where
         v_guessed
             .iter()
             .zip(v_target.iter())
-            .map(|(&x, &y)| (x - y).abs())
+            .map(|(x, y)| (x - y).abs())
             .sum::<f64>()
             / (v_guessed.len() as f64)
     }
@@ -261,7 +267,7 @@ where
         let i = coordinates[0];
         let j = coordinates[1];
         for k in 0..h.shape()[1] {
-            sum += v[[i, k]] * h[[j, k]];
+            sum += v.get([i, k]).unwrap() * h.get([j, k]).unwrap();
         }
         sum
     }
@@ -278,7 +284,7 @@ where
         let i = coordinates[0];
         let j = coordinates[1];
         for k in 0..w.shape()[0] {
-            sum += w[[k, i]] * v[[k, j]];
+            sum += w.get([k, i]).unwrap() * v.get([k, j]).unwrap();
         }
         sum
     }
@@ -298,9 +304,9 @@ where
         for k in 0..w.shape()[0] {
             let mut w_sum = R::Elem::zero();
             for l in 0..w.shape()[1] {
-                w_sum += w[[l, i]] * w[[l, k]];
+                w_sum += w.get([l, i]).unwrap() * w.get([l, k]).unwrap();
             }
-            sum += w_sum * h[[k, j]];
+            sum += &w_sum * h.get([k, j]).unwrap();
         }
         sum
     }
@@ -320,9 +326,9 @@ where
         for k in 0..h.shape()[1] {
             let mut h_sum = R::Elem::zero();
             for l in 0..h.shape()[0] {
-                h_sum += h[[k, l]] * h[[j, l]];
+                h_sum += h.get([k, l]).unwrap() * h.get([j, l]).unwrap();
             }
-            sum += w[[i, k]] * h_sum;
+            sum += w.get([i, k]).unwrap() * &h_sum;
         }
         sum
     }
@@ -351,6 +357,10 @@ where
         + NdProducer
         + Sync
         + Send,
+    for<'a> &'a R::Elem: Add<&'a R::Elem, Output = R::Elem>
+        + Sub<&'a R::Elem, Output = R::Elem>
+        + Mul<&'a R::Elem, Output = R::Elem>
+        + Div<&'a R::Elem, Output = R::Elem>,
 {
     fn set_w(&mut self, w: ArrayBase<R, D>) {
         self.w = w;
