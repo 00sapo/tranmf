@@ -177,3 +177,4 @@ tests/output
 #/target
 .vscode
 .gp.md
+src/tranmf/_nmf.c
