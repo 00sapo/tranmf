@@ -178,3 +178,4 @@ tests/output
 .vscode
 .gp.md
 src/tranmf/_nmf.c
+src/tranmf/_nmf.cpp

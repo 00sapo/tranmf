@@ -10,16 +10,16 @@ authors = [
 ]
 
 dependencies = [
-    "numpy>=1.26.4",
-    "scipy>=1.12.0",
-    "mlflow>=2.10.1",
-    "setuptools>=69.0.3",
-    "tqdm>=4.66.2",
-    "pillow>=10.2.0",
-    "pytest>=8.0.0",
-    "scikit-image>=0.22.0",
-    "opencv-python>=4.9.0.80",
-    "cython>=3.0.8",
+  "numpy>=1.26.4",
+  "scipy>=1.12.0",
+  "mlflow>=2.10.1",
+  "setuptools>=69.0.3",
+  "tqdm>=4.66.2",
+  "pillow>=10.2.0",
+  "pytest>=8.0.0",
+  "scikit-image>=0.22.0",
+  "opencv-python>=4.9.0.80",
+  "cython>=3.0.8",
 ]
 version = "0.1.0"
 
@@ -28,26 +28,27 @@ Documentation = "https://github.com/00sapo/tranmf#readme"
 Issues = "https://github.com/00sapo/tranmf/issues"
 Source = "https://github.com/00sapo/tranmf"
 
+
 [build-system]
-requires = ["maturin>=1.0,<2.0"]
-build-backend = "maturin"
+build-backend = "setuptools.build_meta"
+requires = [
+  "cython>=3.0.6",
+  "setuptools>=69.0.2",
+  "numpy>=1.23.5",
+  "wheel>=0.37.0",
+]
 
-[tool.maturin]
-python-source = "src"
-module-name = "tranmf._rustnmf"
-
-[tool.pdm]
-distribution = false
 
 [tool.pdm.scripts]
-test = { composite = ["rsdevelop", "pytest"] }
 pytest = "python -m unittest"
-rsdevelop = "maturin develop"
+cythonize = "python setup.py build_ext --inplace"
+test = { composite = ["pytest", "cythonize"] }
 
 [tool.pdm.dev-dependencies]
 dev = [
-  "ipython>=8.21.0",
   "ipdb>=0.13.13",
+  "py-spy>=0.3.14",
+  "Cython>=3.0.6",
+  "setuptools>=69.0.2",
   "degan @ file:///${PROJECT_ROOT}/../degan",
-  "maturin>=1.4.0",
 ]

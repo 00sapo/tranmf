@@ -1,6 +1,10 @@
+# cython: language_level=3
+# distutils: language=c++
 import cython as cy
 import numpy as np
 from tqdm import tqdm
+
+# cdivision=True, boundscheck=False, wraparound=False, initializedcheck=False, -profile=True
 
 DType = cy.fused_type(
     cy.short, cy.long, cy.longlong, cy.float, cy.double, cy.longdouble
@@ -10,60 +14,75 @@ Mat2D = cy.typedef(DType[:, :])
 
 @cy.cclass
 class LossComponent:
-
     @cy.ccall
     def majorize_h(self, row: int, col: int, h: Mat2D, w: Mat2D, v: Mat2D) -> float:
-        pass
+        return 0.0
 
     @cy.ccall
     def majorize_w(self, row: int, col: int, h: Mat2D, w: Mat2D, v: Mat2D) -> float:
-        pass
+        return 0.0
 
     @cy.ccall
     def minorize_h(self, row: int, col: int, h: Mat2D, w: Mat2D, v: Mat2D) -> float:
-        pass
+        return 0.0
 
     @cy.ccall
     def minorize_w(self, row: int, col: int, h: Mat2D, w: Mat2D, v: Mat2D) -> float:
-        pass
+        return 0.0
 
     @cy.ccall
     def compute(self, h: Mat2D, w: Mat2D, v: Mat2D, wh: Mat2D) -> float:
-        pass
+        return 0.0
 
 
 @cy.cclass
 class Euclidean2D(LossComponent):
-
     @cy.ccall
     def majorize_h(
-        self, row: cy.size_t, col: cy.size_t, h: Mat2D, w: Mat2D, v: Mat2D
+        self, row: cy.Py_ssize_t, col: cy.Py_ssize_t, h: Mat2D, w: Mat2D, v: Mat2D
     ) -> float:
         return w[:, row] @ v[:, col]
 
     @cy.ccall
     def majorize_w(
-        self, row: cy.size_t, col: cy.size_t, h: Mat2D, w: Mat2D, v: Mat2D
+        self, row: cy.Py_ssize_t, col: cy.Py_ssize_t, h: Mat2D, w: Mat2D, v: Mat2D
     ) -> float:
         return v[row, :] @ h[col, :]
 
     @cy.ccall
     def minorize_h(
-        self, row: cy.size_t, col: cy.size_t, h: Mat2D, w: Mat2D, v: Mat2D
+        self, row: cy.Py_ssize_t, col: cy.Py_ssize_t, h: Mat2D, w: Mat2D, v: Mat2D
     ) -> float:
-        return (w @ h)[row, col] / (w[row, col] + 1e-16)
+        sum: float = 0.0
+        k: cy.Py_ssize_t
+        f: cy.Py_ssize_t
+        for k in range(h.shape[1]):
+            h_sum = 0.0
+            for f in range(h.shape[0]):
+                h_sum += h[k, f] * h[col, f]
+            sum += w[row, k] * h_sum
+        return sum
 
     @cy.ccall
     def minorize_w(
-        self, row: cy.size_t, col: cy.size_t, h: Mat2D, w: Mat2D, v: Mat2D
+        self, row: cy.Py_ssize_t, col: cy.Py_ssize_t, h: Mat2D, w: Mat2D, v: Mat2D
     ) -> float:
-        return (v.T @ h)[col, row] / (v[row, col] + 1e-16)
+        sum: float = 0.0
+
+        k: cy.Py_ssize_t
+        f: cy.Py_ssize_t
+        for k in range(w.shape[0]):
+            w_sum = 0.0
+            for f in range(w.shape[1]):
+                w_sum += w[f, row] * w[f, k]
+            sum += w_sum * h[k, col]
+        return sum
 
     @cy.ccall
     def compute(self, h: Mat2D, w: Mat2D, v: Mat2D, wh: Mat2D) -> float:
         sum: float = 0.0
-        i: cy.size_t
-        j: cy.size_t
+        i: cy.Py_ssize_t
+        j: cy.Py_ssize_t
         for i in range(v.shape[0]):
             for j in range(v.shape[1]):
                 sum += (v[i, j] - wh[i, j]) ** 2
@@ -96,8 +115,8 @@ class _Loss2D:
         else:
             w_copy = w
 
-        i: cy.size_t
-        j: cy.size_t
+        i: cy.Py_ssize_t
+        j: cy.Py_ssize_t
         for i in range(h.shape[0]):
             if not fix_h:
                 # if needed, in order to generalize, we should iterate over all the
