@@ -39,17 +39,21 @@ class LossComponent:
 
 @cy.cclass
 class Euclidean2D(LossComponent):
+    def __init__(self, learning_rate_h=0.001, learning_rate_w=0.001):
+        self.learning_rate_h = learning_rate_h
+        self.learning_rate_w = learning_rate_w
+
     @cy.ccall
     def majorize_h(
         self, row: cy.Py_ssize_t, col: cy.Py_ssize_t, h: Mat2D, w: Mat2D, v: Mat2D
     ) -> float:
-        return w[:, row] @ v[:, col]
+        return self.learning_rate_h * w[:, row] @ v[:, col]
 
     @cy.ccall
     def majorize_w(
         self, row: cy.Py_ssize_t, col: cy.Py_ssize_t, h: Mat2D, w: Mat2D, v: Mat2D
     ) -> float:
-        return v[row, :] @ h[col, :]
+        return self.learning_rate_w * v[row, :] @ h[col, :]
 
     @cy.ccall
     def minorize_h(
@@ -64,7 +68,7 @@ class Euclidean2D(LossComponent):
         k: cy.Py_ssize_t
         for k in range(h.shape[0]):
             sum += (w[:, row] @ w[:, k]) * h[k, col]
-        return sum
+        return sum * self.learning_rate_h
 
     @cy.ccall
     def minorize_w(
@@ -75,7 +79,7 @@ class Euclidean2D(LossComponent):
         k: cy.Py_ssize_t
         for k in range(h.shape[0]):
             sum += w[row, k] * (h[k, :] @ h[col, :])
-        return sum
+        return sum * self.learning_rate_w
 
     @cy.ccall
     def compute(self, h: Mat2D, w: Mat2D, v: Mat2D, wh: Mat2D) -> float:
@@ -131,7 +135,7 @@ class _Loss2D:
                     if self.update_type == "multiplicative":
                         h[i, j] *= majorize / minorize
                     elif self.update_type == "additive":
-                        h[i, j] = h[i, j] - minorize + majorize
+                        h[i, j] += majorize - minorize
 
             if not fix_w:
                 for j in range(w.shape[0]):
@@ -144,7 +148,7 @@ class _Loss2D:
                     if self.update_type == "multiplicative":
                         w[j, i] *= majorize / minorize
                     elif self.update_type == "additive":
-                        w[j, i] = w[j, i] - minorize + majorize
+                        w[j, i] += majorize - minorize
 
 
 class NMF:

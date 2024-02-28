@@ -21,12 +21,12 @@ class TestNMF(unittest.TestCase):
             h,
             w,
             v,
-            [Euclidean2D()],
-            "additive",
+            [Euclidean2D(1e-3, 1e-3)],
+            "multiplicative",
             alternate=lambda x: True,
             verbose=True,
         )
-        nmf.fit(5, 0.1, True, True)
+        nmf.fit(100, 0.1, False, True)
         print(nmf._loss)
 
 
