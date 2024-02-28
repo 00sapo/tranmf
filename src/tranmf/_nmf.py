@@ -39,6 +39,9 @@ class LossComponent:
 
 @cy.cclass
 class Euclidean2D(LossComponent):
+    learning_rate_h: float
+    learning_rate_w: float
+
     def __init__(self, learning_rate_h=0.001, learning_rate_w=0.001):
         self.learning_rate_h = learning_rate_h
         self.learning_rate_w = learning_rate_w
@@ -47,13 +50,13 @@ class Euclidean2D(LossComponent):
     def majorize_h(
         self, row: cy.Py_ssize_t, col: cy.Py_ssize_t, h: Mat2D, w: Mat2D, v: Mat2D
     ) -> float:
-        return self.learning_rate_h * w[:, row] @ v[:, col]
+        return self.learning_rate_h * (w[:, row] @ v[:, col])[0]
 
     @cy.ccall
     def majorize_w(
         self, row: cy.Py_ssize_t, col: cy.Py_ssize_t, h: Mat2D, w: Mat2D, v: Mat2D
     ) -> float:
-        return self.learning_rate_w * v[row, :] @ h[col, :]
+        return self.learning_rate_w * (v[row, :] @ h[col, :])[0]
 
     @cy.ccall
     def minorize_h(
@@ -94,6 +97,9 @@ class Euclidean2D(LossComponent):
 
 @cy.cclass
 class _Loss2D:
+    update_type: str
+    components: list[LossComponent]
+
     def __init__(self, update_type: str, components: list[LossComponent]):
         self.update_type = update_type
         self.components = components
