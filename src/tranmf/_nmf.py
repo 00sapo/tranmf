@@ -1,5 +1,7 @@
 # cython: language_level=3
 # distutils: language=c++
+from typing import Callable
+
 import cython as cy
 import numpy as np
 from tqdm import tqdm
@@ -54,28 +56,25 @@ class Euclidean2D(LossComponent):
         self, row: cy.Py_ssize_t, col: cy.Py_ssize_t, h: Mat2D, w: Mat2D, v: Mat2D
     ) -> float:
         sum: float = 0.0
+
+        # (W^T W H)_ij = \sum_k (W^T W)_ik H_kj =
+        # = \sum_k (\sum_f (W^T_if W_fk) H_kj) =
+        # \sum_k (\sum_f (W_fi W_fk) H_kj) =
+
         k: cy.Py_ssize_t
-        f: cy.Py_ssize_t
-        for k in range(h.shape[1]):
-            h_sum = 0.0
-            for f in range(h.shape[0]):
-                h_sum += h[k, f] * h[col, f]
-            sum += w[row, k] * h_sum
+        for k in range(h.shape[0]):
+            sum += (w[:, row] @ w[:, k]) * h[k, col]
         return sum
 
     @cy.ccall
     def minorize_w(
         self, row: cy.Py_ssize_t, col: cy.Py_ssize_t, h: Mat2D, w: Mat2D, v: Mat2D
     ) -> float:
+        # (W H H^T)_ij = \sum_k (W_ik \sum_f(Hkf H^T_fj)_kj
         sum: float = 0.0
-
         k: cy.Py_ssize_t
-        f: cy.Py_ssize_t
-        for k in range(w.shape[0]):
-            w_sum = 0.0
-            for f in range(w.shape[1]):
-                w_sum += w[f, row] * w[f, k]
-            sum += w_sum * h[k, col]
+        for k in range(h.shape[0]):
+            sum += w[row, k] * (h[k, :] @ h[col, :])
         return sum
 
     @cy.ccall
@@ -132,7 +131,7 @@ class _Loss2D:
                     if self.update_type == "multiplicative":
                         h[i, j] *= majorize / minorize
                     elif self.update_type == "additive":
-                        h[i, j] += majorize - minorize
+                        h[i, j] = h[i, j] - minorize + majorize
 
             if not fix_w:
                 for j in range(w.shape[0]):
@@ -145,7 +144,7 @@ class _Loss2D:
                     if self.update_type == "multiplicative":
                         w[j, i] *= majorize / minorize
                     elif self.update_type == "additive":
-                        w[j, i] += majorize - minorize
+                        w[j, i] = w[j, i] - minorize + majorize
 
 
 class NMF:
@@ -160,7 +159,10 @@ class NMF:
     iterations (int), a tolerance (float) as arguments, and two booleans `fix_h` and
     `fix_w`.
 
-    Use typing annotations for compiling via cython.
+    Supported update types are "multiplicative" and "additive". If `alternate`
+    is given, it should be a function that decides if swapping fix_h and fix_w
+    at each iteration. The input is the current iteration number, and the
+    output is a bool.
     """
 
     def __init__(
@@ -170,29 +172,51 @@ class NMF:
         v: np.ndarray,
         loss_components: list[LossComponent],
         update_type: str,
+        alternate: Callable[int, bool] = None,
+        verbose=False,
     ):
         assert (
             w.shape[1] == h.shape[0]
         ), "w and h must be compatible for matrix multiplication"
         assert w.shape[0] == v.shape[0], "w and v must have the same number of rows"
         assert h.shape[1] == v.shape[1], "h and v must have the same number of columns"
+        if alternate is None:
+            alternate = lambda x: True
 
         self.w = w
         self.h = h
         self.v = v
         self.loss = _Loss2D(update_type, loss_components)
+        self.verbose = verbose
+        self.update_type = update_type
+        self.alternate = alternate
 
     def fit(self, n_iter: int, tol: float, fix_h: bool, fix_w: bool):
         """
         Run the NMF algorithm for n_iter iterations or until the relative change in the
         loss is less than tol. If fix_h is True, the algorithm should not update the h
         matrix. If fix_w is True, the algorithm should not update the w matrix.
+
+        Using `tol` is much slower.
         """
-        if fix_h and fix_w:
+        if not fix_h and not fix_w:
             raise ValueError("At least one of fix_h and fix_w must be False")
 
-        for _ in tqdm(range(n_iter)):
-            new_loss = self.loss.compute(self.h, self.w, self.v, self.w @ self.h)
-            if new_loss < tol:
-                break
+        if self.verbose:
+            iterator = range(n_iter)
+        else:
+            iterator = tqdm(range(n_iter))
+        self._loss = 0.0
+        for self._iter in iterator:
+            if self.alternate is not None:
+                if self.alternate(self._iter):
+                    fix_h = not fix_h
+                    fix_w = not fix_w
+            if tol > 0:
+                self._loss = self.loss.compute(self.h, self.w, self.v, self.w @ self.h)
+                if self._loss < tol:
+                    break
+
             self.loss.update(self.h, self.w, self.v, fix_h, fix_w)
+            if self.verbose:
+                print(f"iter {self._iter}: loss={self._loss}")

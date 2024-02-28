@@ -13,12 +13,21 @@ class TestNMF(unittest.TestCase):
         from tranmf._nmf import NMF, Euclidean2D
 
         # a little test with random data
-        v = np.random.rand(10, 12)
-        w = np.random.rand(10, 7)
-        h = np.random.rand(7, 12)
+        v = np.random.rand(50, 100)
+        w = np.random.rand(50, 50)
+        h = np.random.rand(50, 100)
 
-        nmf = NMF(h, w, v, [Euclidean2D()], "multiplicative")
-        nmf.fit(100, 1e-5, False, False)
+        nmf = NMF(
+            h,
+            w,
+            v,
+            [Euclidean2D()],
+            "additive",
+            alternate=lambda x: True,
+            verbose=True,
+        )
+        nmf.fit(5, 0.1, True, True)
+        print(nmf._loss)
 
 
 if __name__ == "__main__":
