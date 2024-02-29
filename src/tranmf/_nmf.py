@@ -1,64 +1,43 @@
 # cython: language_level=3
-# distutils: language=c++
+# distutils: language=c++, cdivision=True, boundscheck=False, wraparound=False, initializedcheck=False, -profile=True
 from typing import Callable
 
 import cython as cy
-import numpy as np
+from cython.cimports import numpy as np
 from tqdm import tqdm
 
-# cdivision=True, boundscheck=False, wraparound=False, initializedcheck=False, -profile=True
+if cy.compiled:
+    np.import_array()
+
 
 DType = cy.fused_type(
     cy.short, cy.long, cy.longlong, cy.float, cy.double, cy.longdouble
 )
-Mat2D = cy.typedef(DType[:, :])
+Mat2D = cy.typedef(np.ndarray)
 
 
 @cy.cclass
-class LossComponent:
-    @cy.ccall
-    def majorize_h(self, row: int, col: int, h: Mat2D, w: Mat2D, v: Mat2D) -> float:
-        return 0.0
-
-    @cy.ccall
-    def majorize_w(self, row: int, col: int, h: Mat2D, w: Mat2D, v: Mat2D) -> float:
-        return 0.0
-
-    @cy.ccall
-    def minorize_h(self, row: int, col: int, h: Mat2D, w: Mat2D, v: Mat2D) -> float:
-        return 0.0
-
-    @cy.ccall
-    def minorize_w(self, row: int, col: int, h: Mat2D, w: Mat2D, v: Mat2D) -> float:
-        return 0.0
-
-    @cy.ccall
-    def compute(self, h: Mat2D, w: Mat2D, v: Mat2D, wh: Mat2D) -> float:
-        return 0.0
-
-
-@cy.cclass
-class Euclidean2D(LossComponent):
+class Euclidean2D:
     learning_rate_h: float
     learning_rate_w: float
 
-    def __init__(self, learning_rate_h=0.001, learning_rate_w=0.001):
+    def __init__(self, learning_rate_h: float, learning_rate_w: float):
         self.learning_rate_h = learning_rate_h
         self.learning_rate_w = learning_rate_w
 
-    @cy.ccall
+    @cy.cfunc
     def majorize_h(
         self, row: cy.Py_ssize_t, col: cy.Py_ssize_t, h: Mat2D, w: Mat2D, v: Mat2D
     ) -> float:
-        return self.learning_rate_h * (w[:, row] @ v[:, col])[0]
+        return self.learning_rate_h * (w[:, row] @ v[:, col])
 
-    @cy.ccall
+    @cy.cfunc
     def majorize_w(
         self, row: cy.Py_ssize_t, col: cy.Py_ssize_t, h: Mat2D, w: Mat2D, v: Mat2D
     ) -> float:
-        return self.learning_rate_w * (v[row, :] @ h[col, :])[0]
+        return self.learning_rate_w * (v[row, :] @ h[col, :])
 
-    @cy.ccall
+    @cy.cfunc
     def minorize_h(
         self, row: cy.Py_ssize_t, col: cy.Py_ssize_t, h: Mat2D, w: Mat2D, v: Mat2D
     ) -> float:
@@ -73,7 +52,7 @@ class Euclidean2D(LossComponent):
             sum += (w[:, row] @ w[:, k]) * h[k, col]
         return sum * self.learning_rate_h
 
-    @cy.ccall
+    @cy.cfunc
     def minorize_w(
         self, row: cy.Py_ssize_t, col: cy.Py_ssize_t, h: Mat2D, w: Mat2D, v: Mat2D
     ) -> float:
@@ -84,7 +63,7 @@ class Euclidean2D(LossComponent):
             sum += w[row, k] * (h[k, :] @ h[col, :])
         return sum * self.learning_rate_w
 
-    @cy.ccall
+    @cy.cfunc
     def compute(self, h: Mat2D, w: Mat2D, v: Mat2D, wh: Mat2D) -> float:
         sum: float = 0.0
         i: cy.Py_ssize_t
@@ -98,20 +77,24 @@ class Euclidean2D(LossComponent):
 @cy.cclass
 class _Loss2D:
     update_type: str
-    components: list[LossComponent]
+    components: list
 
-    def __init__(self, update_type: str, components: list[LossComponent]):
+    def __init__(self, update_type: str, components: list):
         self.update_type = update_type
         self.components = components
 
-    @cy.ccall
+    @cy.cfunc
     def compute(self, h: Mat2D, w: Mat2D, v: Mat2D, wh: Mat2D) -> float:
         sum = 0.0
         for c in self.components:
-            sum += c.compute(h, w, v, wh)
+            if c.__class__ == Euclidean2D:
+                c_ = cy.cast(Euclidean2D, c, typecheck=True)
+            else:
+                raise ValueError(f"Unsupported loss component {c.__class__}")
+            sum += c_.compute(h, w, v, wh)
         return sum
 
-    @cy.ccall
+    @cy.cfunc
     def update(self, h: Mat2D, w: Mat2D, v: Mat2D, fix_h: bool, fix_w: bool):
         """Updates h and w in place using the majorization and minorization of each loss-component"""
         if not fix_h:
@@ -136,8 +119,14 @@ class _Loss2D:
                     majorize = 0.0
                     minorize = 0.0
                     for c in self.components:
-                        majorize += c.majorize_h(i, j, h_copy, w_copy, v)
-                        minorize += c.minorize_h(i, j, h_copy, w_copy, v)
+                        if c.__class__ == Euclidean2D:
+                            c_ = cy.cast(Euclidean2D, c, typecheck=True)
+                        else:
+                            raise ValueError(
+                                f"Unsupported loss component {c.__class__}"
+                            )
+                        majorize += c_.majorize_h(i, j, h_copy, w_copy, v)
+                        minorize += c_.minorize_h(i, j, h_copy, w_copy, v)
                     if self.update_type == "multiplicative":
                         h[i, j] *= majorize / minorize
                     elif self.update_type == "additive":
@@ -149,14 +138,21 @@ class _Loss2D:
                     majorize = 0.0
                     minorize = 0.0
                     for c in self.components:
-                        majorize += c.majorize_w(j, i, h_copy, w_copy, v)
-                        minorize += c.minorize_w(j, i, h_copy, w_copy, v)
+                        if c.__class__ == Euclidean2D:
+                            c_ = cy.cast(Euclidean2D, c, typecheck=True)
+                        else:
+                            raise ValueError(
+                                f"Unsupported loss component {c.__class__}"
+                            )
+                        majorize += c_.majorize_w(j, i, h_copy, w_copy, v)
+                        minorize += c_.minorize_w(j, i, h_copy, w_copy, v)
                     if self.update_type == "multiplicative":
                         w[j, i] *= majorize / minorize
                     elif self.update_type == "additive":
                         w[j, i] += majorize - minorize
 
 
+@cy.cclass
 class NMF:
     """
     The code should expose a class NMF2D that has 3 2D arrays (`h`, `w`, and `v`) and a
@@ -175,12 +171,22 @@ class NMF:
     output is a bool.
     """
 
+    w: Mat2D
+    h: Mat2D
+    v: Mat2D
+    loss: _Loss2D
+    verbose: bool
+    update_type: str
+    alternate: Callable[int, bool]
+    _loss: float
+    _iter: cy.Py_ssize_t
+
     def __init__(
         self,
         h: np.ndarray,
         w: np.ndarray,
         v: np.ndarray,
-        loss_components: list[LossComponent],
+        loss_components: list,
         update_type: str,
         alternate: Callable[int, bool] = None,
         verbose=False,
@@ -201,6 +207,7 @@ class NMF:
         self.update_type = update_type
         self.alternate = alternate
 
+    @cy.ccall
     def fit(self, n_iter: int, tol: float, fix_h: bool, fix_w: bool):
         """
         Run the NMF algorithm for n_iter iterations or until the relative change in the
