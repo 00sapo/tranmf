@@ -14,19 +14,16 @@ class TestNMF(unittest.TestCase):
 
         # a little test with random data
         v = np.random.rand(50, 100)
-        w = np.random.rand(50, 500)
-        h = np.random.rand(500, 100)
+        w = np.random.rand(50, 50)
+        h = np.random.rand(50, 100)
 
         nmf = NMF(
-            h,
-            w,
-            v,
             [Euclidean2D(1e-3, 1e-3)],
             "multiplicative",
             alternate=lambda x: True,
             verbose=False,
         )
-        nmf.fit(100, 0.1, False, True)
+        nmf.fit(w, h, v, 100, 0.1, False, True)
 
 
 if __name__ == "__main__":
