@@ -24,6 +24,7 @@ class TestNMF(unittest.TestCase):
             verbose=False,
         )
         nmf.fit(w, h, v, 100, 0.1, False, True)
+        print(nmf.get_loss())
 
 
 if __name__ == "__main__":
