@@ -2,6 +2,8 @@
 # distutils: language=c++, cdivision=True, boundscheck=False, wraparound=False, initializedcheck=False, -profile=True
 from typing import Callable
 
+from cython.parallel cimport prange
+cimport cython
 import numpy as np
 cimport numpy as np
 from tqdm import tqdm
@@ -21,7 +23,9 @@ ctypedef np.float64_t DType
 #
 
 # dot-product of two 1D arrays
-cdef DType dot2d(DType[:] a, DType[:] b):
+@cython.boundscheck(False)
+@cython.wraparound(False)
+cdef DType dot2d(DType[:] a, DType[:] b) noexcept nogil:
     cdef int i
     cdef DType s = 0.0
     for i in range(a.shape[0]):
@@ -37,19 +41,25 @@ cdef class Euclidean2D:
         self.learning_rate_h = learning_rate_h
         self.learning_rate_w = learning_rate_w
 
+    @cython.boundscheck(False)
+    @cython.wraparound(False)
     cdef double majorize_h(
         self, int row, int col, DType[:, :] h, DType[:, :] w, DType[:, :] v
-    ):
+    ) noexcept nogil:
         return self.learning_rate_h * dot2d(w[:, row], v[:, col])
 
+    @cython.boundscheck(False)
+    @cython.wraparound(False)
     cdef double majorize_w(
         self, int row, int col, DType[:, :] h, DType[:, :] w, DType[:, :] v
-    ):
+    ) noexcept nogil:
         return self.learning_rate_w * dot2d(v[row, :], h[col, :])
 
+    @cython.boundscheck(False)
+    @cython.wraparound(False)
     cdef double minorize_h(
         self, int row, int col, DType[:, :] h, DType[:, :] w, DType[:, :] v
-    ):
+    ) noexcept nogil:
         cdef double s = 0.0
 
         # (W^T W H)_ij = \s_k (W^T W)_ik H_kj =
@@ -61,9 +71,11 @@ cdef class Euclidean2D:
             s = s + dot2d(w[:, row], w[:, k]) * h[k, col]
         return s * self.learning_rate_h
 
+    @cython.boundscheck(False)
+    @cython.wraparound(False)
     cdef double minorize_w(
         self, int row, int col, DType[:, :] h, DType[:, :] w, DType[:, :] v
-    ):
+    ) noexcept nogil:
         # (W H H^T)_ij = \s_k (W_ik \s_f(Hkf H^T_fj)_kj
         cdef double s = 0.0
         cdef int k
@@ -71,7 +83,9 @@ cdef class Euclidean2D:
             s = s + w[row, k] * dot2d(h[k, :], h[col, :])
         return s * self.learning_rate_w
 
-    cdef double compute(self, DType[:, :] h, DType[:, :] w, DType[:, :] v, DType[:, :] wh):
+    @cython.boundscheck(False)
+    @cython.wraparound(False)
+    cdef double compute(self, DType[:, :] h, DType[:, :] w, DType[:, :] v, DType[:, :] wh) noexcept nogil:
         cdef double s = 0.0
         cdef int i, j
         for i in range(v.shape[0]):
@@ -98,6 +112,8 @@ cdef class _Loss2D:
             s = s + c_.compute(h, w, v, wh)
         return s
 
+    @cython.boundscheck(False)
+    @cython.wraparound(False)
     cdef update(self, DType[:, :] h, DType[:, :] w, DType[:, :] v, bint fix_h, bint fix_w):
         """Updates h and w in place using the majorization and minorization of each loss-component"""
         if not fix_h:
@@ -110,48 +126,56 @@ cdef class _Loss2D:
         else:
             w_copy = w
 
+        cdef str update_type = self.update_type
         cdef int i, j
-        for i in range(h.shape[0]):
-            if not fix_h:
-                # if needed, in order to generalize, we should iterate over all the
-                # other dimensions of h and w and pass a list of indices to the
-                # loss components
-                for j in range(h.shape[1]):
-                    # j is the column index
-                    majorize = 0.0
-                    minorize = 0.0
-                    for c in self.components:
-                        if c.__class__ == Euclidean2D:
-                            c_ = <Euclidean2D> c
-                        else:
-                            raise ValueError(
-                                f"Unsupported loss component {c.__class__}"
-                            )
-                        majorize = majorize + c_.majorize_h(i, j, h_copy, w_copy, v)
-                        minorize = minorize + c_.minorize_h(i, j, h_copy, w_copy, v)
-                    if self.update_type == "multiplicative":
-                        h[i, j] = h[i, j] * majorize / minorize
-                    elif self.update_type == "additive":
-                        h[i, j] = h[i, j] + majorize - minorize
+        cdef DType[:, :] majorize_w
+        cdef DType[:, :] majorize_h
+        cdef DType[:, :] minorize_w
+        cdef DType[:, :] minorize_h
+        if not fix_h:
+            minorize_h = np.empty_like(h)
+            majorize_h = np.empty_like(h)
+        if not fix_w:
+            minorize_w = np.empty_like(w)
+            majorize_w = np.empty_like(w)
 
+        for c in self.components:
+            if c.__class__ == Euclidean2D:
+                c_ = <Euclidean2D> c
+            else:
+                raise ValueError(
+                    f"Unsupported loss component {c.__class__}"
+                )
+            for i in prange(h.shape[0], nogil=True):
+                if not fix_h:
+                    # if needed, in order to generalize, we should iterate over all the
+                    # other dimensions of h and w and pass a list of indices to the
+                    # loss components
+                    for j in range(h.shape[1]):
+                        # j is the column index
+                        majorize_h[i, j] = majorize_h[i, j] + c_.majorize_h(i, j, h_copy, w_copy, v)
+                        minorize_h[i, j] = minorize_h[i, j] + c_.minorize_h(i, j, h_copy, w_copy, v)
+
+                if not fix_w:
+                    for j in range(w.shape[0]):
+                        # j is the row index
+                        majorize_w[j, i] = majorize_w[j, i] + c_.majorize_w(j, i, h_copy, w_copy, v)
+                        minorize_w[j, i] = minorize_w[j, i] + c_.minorize_w(j, i, h_copy, w_copy, v)
+
+            if not fix_h:
+                for i in range(h.shape[0]):
+                    for j in range(h.shape[1]):
+                        if update_type == "multiplicative":
+                            h[i, j] = h[i, j] * majorize_h[i, j] / minorize_h[i, j]
+                        elif update_type == "additive":
+                            h[i, j] = h[i, j] + majorize_h[i, j] - minorize_h[i, j]
             if not fix_w:
-                for j in range(w.shape[0]):
-                    # j is the row index
-                    majorize = 0.0
-                    minorize = 0.0
-                    for c in self.components:
-                        if c.__class__ == Euclidean2D:
-                            c_ = <Euclidean2D> c
-                        else:
-                            raise ValueError(
-                                f"Unsupported loss component {c.__class__}"
-                            )
-                        majorize = majorize + c_.majorize_w(j, i, h_copy, w_copy, v)
-                        minorize = minorize + c_.minorize_w(j, i, h_copy, w_copy, v)
-                    if self.update_type == "multiplicative":
-                        w[j, i] = w[j, i] * majorize / minorize
-                    elif self.update_type == "additive":
-                        w[j, i] = w[j, i] + majorize - minorize
+                for i in range(w.shape[0]):
+                    for j in range(w.shape[1]):
+                        if update_type == "multiplicative":
+                            w[i, j] = w[i, j] * majorize_w[i, j] / minorize_w[i, j]
+                        elif update_type == "additive":
+                            w[i, j] = w[i, j] + majorize_w[i, j] - minorize_w[i, j]
 
 
 cdef class NMF:
