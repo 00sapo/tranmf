@@ -1,3 +1,4 @@
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -14,14 +15,15 @@ class TestNMF(unittest.TestCase):
 
         # a little test with random data
         v = np.random.rand(50, 100)
-        w = np.random.rand(50, 50)
-        h = np.random.rand(50, 100)
+        w = np.random.rand(50, 200)
+        h = np.random.rand(200, 100)
 
         nmf = NMF(
             [Euclidean2D(1e-3, 1e-3)],
             "multiplicative",
             alternate=lambda x: True,
             verbose=False,
+            num_threads=os.cpu_count(),
         )
         nmf.fit(w, h, v, 100, 0.1, False, True)
         print(nmf.get_loss())

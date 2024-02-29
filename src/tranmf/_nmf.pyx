@@ -1,12 +1,13 @@
 # cython: language_level=3
-# distutils: language=c++, cdivision=True, boundscheck=False, wraparound=False, initializedcheck=False, -profile=True
+# distutils: language=c++, cdivision=True, initializedcheck=False, -profile=True
 from typing import Callable
 
-from cython.parallel cimport prange
+from cython.parallel cimport parallel
 cimport cython
 import numpy as np
 cimport numpy as np
 from tqdm import tqdm
+from openmp cimport omp_get_thread_num
 
 np.import_array()
 
@@ -23,9 +24,9 @@ ctypedef np.float64_t DType
 #
 
 # dot-product of two 1D arrays
-@cython.boundscheck(False)
-@cython.wraparound(False)
-cdef DType dot2d(DType[:] a, DType[:] b) noexcept nogil:
+# @cython.boundscheck(False)
+# @cython.wraparound(False)
+cdef DType dot2d(DType[:] a, DType[:] b) nogil:
     cdef int i
     cdef DType s = 0.0
     for i in range(a.shape[0]):
@@ -41,25 +42,25 @@ cdef class Euclidean2D:
         self.learning_rate_h = learning_rate_h
         self.learning_rate_w = learning_rate_w
 
-    @cython.boundscheck(False)
-    @cython.wraparound(False)
+    # @cython.boundscheck(False)
+    # @cython.wraparound(False)
     cdef double majorize_h(
         self, int row, int col, DType[:, :] h, DType[:, :] w, DType[:, :] v
-    ) noexcept nogil:
+    ) nogil:
         return self.learning_rate_h * dot2d(w[:, row], v[:, col])
 
-    @cython.boundscheck(False)
-    @cython.wraparound(False)
+    # @cython.boundscheck(False)
+    # @cython.wraparound(False)
     cdef double majorize_w(
         self, int row, int col, DType[:, :] h, DType[:, :] w, DType[:, :] v
-    ) noexcept nogil:
+    ) nogil:
         return self.learning_rate_w * dot2d(v[row, :], h[col, :])
 
-    @cython.boundscheck(False)
-    @cython.wraparound(False)
+    # @cython.boundscheck(False)
+    # @cython.wraparound(False)
     cdef double minorize_h(
         self, int row, int col, DType[:, :] h, DType[:, :] w, DType[:, :] v
-    ) noexcept nogil:
+    ) nogil:
         cdef double s = 0.0
 
         # (W^T W H)_ij = \s_k (W^T W)_ik H_kj =
@@ -71,11 +72,11 @@ cdef class Euclidean2D:
             s = s + dot2d(w[:, row], w[:, k]) * h[k, col]
         return s * self.learning_rate_h
 
-    @cython.boundscheck(False)
-    @cython.wraparound(False)
+    # @cython.boundscheck(False)
+    # @cython.wraparound(False)
     cdef double minorize_w(
         self, int row, int col, DType[:, :] h, DType[:, :] w, DType[:, :] v
-    ) noexcept nogil:
+    ) nogil:
         # (W H H^T)_ij = \s_k (W_ik \s_f(Hkf H^T_fj)_kj
         cdef double s = 0.0
         cdef int k
@@ -83,9 +84,9 @@ cdef class Euclidean2D:
             s = s + w[row, k] * dot2d(h[k, :], h[col, :])
         return s * self.learning_rate_w
 
-    @cython.boundscheck(False)
-    @cython.wraparound(False)
-    cdef double compute(self, DType[:, :] h, DType[:, :] w, DType[:, :] v, DType[:, :] wh) noexcept nogil:
+    # @cython.boundscheck(False)
+    # @cython.wraparound(False)
+    cdef double compute(self, DType[:, :] h, DType[:, :] w, DType[:, :] v, DType[:, :] wh) nogil:
         cdef double s = 0.0
         cdef int i, j
         for i in range(v.shape[0]):
@@ -112,9 +113,9 @@ cdef class _Loss2D:
             s = s + c_.compute(h, w, v, wh)
         return s
 
-    @cython.boundscheck(False)
-    @cython.wraparound(False)
-    cdef update(self, DType[:, :] h, DType[:, :] w, DType[:, :] v, bint fix_h, bint fix_w):
+    # @cython.boundscheck(False)
+    # @cython.wraparound(False)
+    cdef update(self, DType[:, :] h, DType[:, :] w, DType[:, :] v, bint fix_h, bint fix_w, int num_threads):
         """Updates h and w in place using the majorization and minorization of each loss-component"""
         if not fix_h:
             h_copy = h.copy()
@@ -126,6 +127,7 @@ cdef class _Loss2D:
         else:
             w_copy = w
 
+        # computing the components
         cdef str update_type = self.update_type
         cdef int i, j
         cdef DType[:, :] majorize_w
@@ -139,6 +141,9 @@ cdef class _Loss2D:
             minorize_w = np.zeros_like(w)
             majorize_w = np.zeros_like(w)
 
+        cdef int thread_num
+        cdef int start_i
+        cdef int end_i
         for c in self.components:
             if c.__class__ == Euclidean2D:
                 c_ = <Euclidean2D> c
@@ -146,36 +151,49 @@ cdef class _Loss2D:
                 raise ValueError(
                     f"Unsupported loss component {c.__class__}"
                 )
-            for i in prange(h.shape[0], nogil=True):
+            # there's a bug in cython's prange, need to handle threads one by one...
+            with nogil, parallel(num_threads=num_threads):
+                thread_num = omp_get_thread_num()
+                start_i = h.shape[0] // num_threads * thread_num
+                end_i = h.shape[0] // num_threads * (thread_num + 1)
+                if thread_num == num_threads - 1:
+                    end_i = h.shape[0]
+
+                for i in range(start_i, end_i):
+                    if not fix_h:
+                        # if needed, in order to generalize, we should iterate over all the
+                        # other dimensions of h and w and pass a list of indices to the
+                        # loss components
+                        for j in range(h.shape[1]):
+                            # j is the column index
+                            majorize_h[i, j] = majorize_h[i, j] + c_.majorize_h(i, j, h_copy, w_copy, v)
+                            minorize_h[i, j] = minorize_h[i, j] + c_.minorize_h(i, j, h_copy, w_copy, v)
+
+                    if not fix_w:
+                        for j in range(w.shape[0]):
+                            # j is the row index
+                            majorize_w[j, i] = majorize_w[j, i] + c_.majorize_w(j, i, h_copy, w_copy, v)
+                            minorize_w[j, i] = minorize_w[j, i] + c_.minorize_w(j, i, h_copy, w_copy, v)
+
+        # now summing the components
+        with nogil, parallel(num_threads=num_threads):
+            thread_num = omp_get_thread_num()
+            start_i = h.shape[0] // num_threads * thread_num
+            end_i = h.shape[0] // num_threads * (thread_num + 1)
+            for i in range(start_i, end_i):
                 if not fix_h:
-                    # if needed, in order to generalize, we should iterate over all the
-                    # other dimensions of h and w and pass a list of indices to the
-                    # loss components
-                    for j in range(h.shape[1]):
-                        # j is the column index
-                        majorize_h[i, j] = majorize_h[i, j] + c_.majorize_h(i, j, h_copy, w_copy, v)
-                        minorize_h[i, j] = minorize_h[i, j] + c_.minorize_h(i, j, h_copy, w_copy, v)
-
-                if not fix_w:
-                    for j in range(w.shape[0]):
-                        # j is the row index
-                        majorize_w[j, i] = majorize_w[j, i] + c_.majorize_w(j, i, h_copy, w_copy, v)
-                        minorize_w[j, i] = minorize_w[j, i] + c_.minorize_w(j, i, h_copy, w_copy, v)
-
-            if not fix_h:
-                for i in range(h.shape[0]):
                     for j in range(h.shape[1]):
                         if update_type == "multiplicative":
-                            h[i, j] = h[i, j] * majorize_h[i, j] / minorize_h[i, j]
+                            h[i, j] = h[i, j] * majorize_h[i, j] / (minorize_h[i, j] + 1e-31)
                         elif update_type == "additive":
                             h[i, j] = h[i, j] + majorize_h[i, j] - minorize_h[i, j]
-            if not fix_w:
-                for i in range(w.shape[0]):
-                    for j in range(w.shape[1]):
+                if not fix_w:
+                    # for i in prange(w.shape[0], nogil=True):
+                    for j in range(w.shape[0]):
                         if update_type == "multiplicative":
-                            w[i, j] = w[i, j] * majorize_w[i, j] / minorize_w[i, j]
+                            w[j, i] = w[j, i] * majorize_w[j, i] / (minorize_w[j, i] + 1e-31)
                         elif update_type == "additive":
-                            w[i, j] = w[i, j] + majorize_w[i, j] - minorize_w[i, j]
+                            w[j, i] = w[j, i] + majorize_w[j, i] - minorize_w[j, i]
 
 
 cdef class NMF:
@@ -200,6 +218,7 @@ cdef class NMF:
     cdef bint verbose
     cdef str update_type
     cdef object alternate  # without specific Callable typing, we default to 'object'
+    cdef int num_threads
     cdef double _loss
     cdef int _iter
 
@@ -211,7 +230,8 @@ cdef class NMF:
         list loss_components,
         str update_type,
         alternate = None,
-        bint verbose = False
+        bint verbose = False,
+        int num_threads = 1
     ):
         if alternate is None:
             alternate = lambda x: True
@@ -220,6 +240,7 @@ cdef class NMF:
         self.verbose = verbose
         self.update_type = update_type
         self.alternate = alternate
+        self.num_threads = num_threads
 
     cpdef fit(self,
              np.ndarray[DType, ndim=2] w,
@@ -256,6 +277,6 @@ cdef class NMF:
                 if self._loss < tol:
                     break
 
-            self.loss.update(h, w, v, fix_h, fix_w)
+            self.loss.update(h, w, v, fix_h, fix_w, self.num_threads)
             if self.verbose:
                 print(f"iter {self._iter}: loss={self._loss}")
