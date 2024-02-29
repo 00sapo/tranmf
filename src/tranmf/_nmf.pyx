@@ -2,6 +2,8 @@
 # distutils: language=c++, cdivision=True, boundscheck=False, wraparound=False, initializedcheck=False, -profile=True
 from typing import Callable
 
+cimport cython
+import time
 import numpy as np
 cimport numpy as np
 from tqdm import tqdm
@@ -21,7 +23,9 @@ ctypedef np.float64_t DType
 #
 
 # dot-product of two 1D arrays
-cdef DType dot2d(DType[:] a, DType[:] b):
+@cython.boundscheck(False)
+@cython.wraparound(False)
+cdef DType dot2d(DType[:] a, DType[:] b) noexcept nogil:
     cdef int i
     cdef DType s = 0.0
     for i in range(a.shape[0]):
@@ -37,19 +41,25 @@ cdef class Euclidean2D:
         self.learning_rate_h = learning_rate_h
         self.learning_rate_w = learning_rate_w
 
+    @cython.boundscheck(False)
+    @cython.wraparound(False)
     cdef double majorize_h(
         self, int row, int col, DType[:, :] h, DType[:, :] w, DType[:, :] v
-    ):
+        ) noexcept nogil:
         return self.learning_rate_h * dot2d(w[:, row], v[:, col])
 
+    @cython.boundscheck(False)
+    @cython.wraparound(False)
     cdef double majorize_w(
         self, int row, int col, DType[:, :] h, DType[:, :] w, DType[:, :] v
-    ):
+        ) noexcept nogil:
         return self.learning_rate_w * dot2d(v[row, :], h[col, :])
 
+    @cython.boundscheck(False)
+    @cython.wraparound(False)
     cdef double minorize_h(
         self, int row, int col, DType[:, :] h, DType[:, :] w, DType[:, :] v
-    ):
+        ) noexcept nogil:
         cdef double s = 0.0
 
         # (W^T W H)_ij = \s_k (W^T W)_ik H_kj =
@@ -61,9 +71,11 @@ cdef class Euclidean2D:
             s = s + dot2d(w[:, row], w[:, k]) * h[k, col]
         return s * self.learning_rate_h
 
+    @cython.boundscheck(False)
+    @cython.wraparound(False)
     cdef double minorize_w(
         self, int row, int col, DType[:, :] h, DType[:, :] w, DType[:, :] v
-    ):
+        ) noexcept nogil:
         # (W H H^T)_ij = \s_k (W_ik \s_f(Hkf H^T_fj)_kj
         cdef double s = 0.0
         cdef int k
@@ -71,7 +83,9 @@ cdef class Euclidean2D:
             s = s + w[row, k] * dot2d(h[k, :], h[col, :])
         return s * self.learning_rate_w
 
-    cdef double compute(self, DType[:, :] h, DType[:, :] w, DType[:, :] v, DType[:, :] wh):
+    @cython.boundscheck(False)
+    @cython.wraparound(False)
+    cdef double compute(self, DType[:, :] h, DType[:, :] w, DType[:, :] v, DType[:, :] wh) noexcept nogil:
         cdef double s = 0.0
         cdef int i, j
         for i in range(v.shape[0]):
@@ -182,6 +196,9 @@ cdef class NMF:
     def get_loss(self):
         return self._loss
 
+    def set_alternate(self, alternate):
+        self.alternate = alternate
+
     def __init__(
         self,
         list loss_components,
@@ -223,6 +240,7 @@ cdef class NMF:
             iterator = tqdm(range(n_iter))
         self._loss = 0.0
         for self._iter in iterator:
+            ttt = time.time()
             if self.alternate is not None:
                 if self.alternate(self._iter):
                     fix_h = not fix_h
@@ -234,4 +252,4 @@ cdef class NMF:
 
             self.loss.update(h, w, v, fix_h, fix_w)
             if self.verbose:
-                print(f"iter {self._iter}: loss={self._loss}")
+                print(f"iter {self._iter}: loss={self._loss:.2e}, time={time.time() - ttt:.2f}")
