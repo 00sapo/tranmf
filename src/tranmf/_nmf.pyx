@@ -133,11 +133,11 @@ cdef class _Loss2D:
         cdef DType[:, :] minorize_w
         cdef DType[:, :] minorize_h
         if not fix_h:
-            minorize_h = np.empty_like(h)
-            majorize_h = np.empty_like(h)
+            minorize_h = np.zeros_like(h)
+            majorize_h = np.zeros_like(h)
         if not fix_w:
-            minorize_w = np.empty_like(w)
-            majorize_w = np.empty_like(w)
+            minorize_w = np.zeros_like(w)
+            majorize_w = np.zeros_like(w)
 
         for c in self.components:
             if c.__class__ == Euclidean2D:
