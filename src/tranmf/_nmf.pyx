@@ -156,13 +156,13 @@ cdef class _Loss2D:
 
 cdef class NMF:
     """
-    The code should expose a class NMF2D that has 3 2D arrays (`h`, `w`, and `v`) and a
+    The code should expose a class NMF that has 3 2D arrays (`h`, `w`, and `v`) and a
     Loss object as attributes. The type Loss contains a vector of LossComponent. Each
     LossComponent has methods `compute`, `majorize_h`, `majorize_w`, `minorize_h`, and
     `minorize_w`, receiving as arguments the matrices `h`, `w`, `v`, and the
     re-constructed `w @ h`. The Loss also has these methods that call the respective
     methods of the LossComponent objects for each element of the `w` and `h` matrices.
-    The NMF2D class should have two methods `fit` and `step` that take a number of
+    The NMF class should have two methods `fit` and `step` that take a number of
     iterations (int), a tolerance (double) as arguments, and two booleans `fix_h` and
     `fix_w`.
 
@@ -207,7 +207,7 @@ cdef class NMF:
         loss is less than tol. If fix_h is True, the algorithm should not update the h
         matrix. If fix_w is True, the algorithm should not update the w matrix.
 
-        Using `tol` is much slower.
+        Using `tol` is slightly slower.
         """
         assert (
             w.shape[1] == h.shape[0]
