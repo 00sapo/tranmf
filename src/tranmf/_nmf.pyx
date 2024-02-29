@@ -2,6 +2,7 @@
 # distutils: language=c++, cdivision=True, initializedcheck=False, -profile=True
 from typing import Callable
 
+import time
 from cython.parallel cimport parallel
 cimport cython
 import numpy as np
@@ -225,6 +226,9 @@ cdef class NMF:
     def get_loss(self):
         return self._loss
 
+    def set_alternate(self, alternate):
+        self.alternate = alternate
+
     def __init__(
         self,
         list loss_components,
@@ -268,6 +272,7 @@ cdef class NMF:
             iterator = tqdm(range(n_iter))
         self._loss = 0.0
         for self._iter in iterator:
+            ttt = time.time()
             if self.alternate is not None:
                 if self.alternate(self._iter):
                     fix_h = not fix_h
@@ -279,4 +284,4 @@ cdef class NMF:
 
             self.loss.update(h, w, v, fix_h, fix_w, self.num_threads)
             if self.verbose:
-                print(f"iter {self._iter}: loss={self._loss}")
+                print(f"iter {self._iter}: loss={self._loss:.2e}, time={time.time() - ttt:.2f}")

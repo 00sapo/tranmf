@@ -14,18 +14,21 @@ class TestNMF(unittest.TestCase):
         from tranmf._nmf import NMF, Euclidean2D
 
         # a little test with random data
-        v = np.random.rand(50, 100)
-        w = np.random.rand(50, 200)
-        h = np.random.rand(200, 100)
+        v = np.random.rand(50, 512)
+        w = np.random.rand(50, 1000)
+        h = np.random.rand(1000, 512)
 
         nmf = NMF(
             [Euclidean2D(1e-3, 1e-3)],
             "multiplicative",
-            alternate=lambda x: True,
-            verbose=False,
+            alternate=lambda x: False,
+            verbose=True,
             num_threads=os.cpu_count(),
         )
-        nmf.fit(w, h, v, 100, 0.1, False, True)
+        nmf.fit(w, h, v, 3, 0.1, True, False)
+        nmf.fit(w, h, v, 3, 0.1, False, True)
+        nmf.set_alternate(lambda x: True)
+        nmf.fit(w, h, v, 3, 0.1, False, True)
         print(nmf.get_loss())
 
 
