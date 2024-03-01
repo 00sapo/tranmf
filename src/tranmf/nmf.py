@@ -168,7 +168,7 @@ def run_single_nmf(
     Returns:
         np.ndarray: The H matrix.
     """
-    from tranmf._nmf import NMF, Euclidean2D
+    from tranmf._nmf import NMF, Diagonalize2D, Euclidean2D
 
     # put image in grayscale mode
     # resize image strip to match W's height
@@ -182,7 +182,7 @@ def run_single_nmf(
     print("image_strip shape", image_strip.shape)
 
     nmf = NMF(
-        [Euclidean2D(1e-3, 1e-3)],
+        [Euclidean2D(1, 1), Diagonalize2D(1, 1)],
         "multiplicative",
         alternate=lambda x: False,
         verbose=True,

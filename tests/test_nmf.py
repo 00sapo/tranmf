@@ -45,6 +45,8 @@ class TestNMF(unittest.TestCase):
         W = W.select_alphabet("abcdefghjklmnopqrstuvwxyzABCDEFCHIJKLMNOPQRSTUVWXYZ")
         W, H = run_single_nmf(image_strip, W)
 
+        print(H.max(), H.min())
+
         # show the H matrix
         cv2.imshow("H", H)
         # show the W matrix

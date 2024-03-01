@@ -37,6 +37,70 @@ cdef DType dot2d(DType[:] a, DType[:] b) noexcept nogil:
         s = s + a[i] * b[i]
     return s
 
+cdef class Diagonalize2D:
+    cdef double learning_rate_h
+    cdef double learning_rate_w
+
+    def __init__(self, double learning_rate_h, double learning_rate_w):
+        self.learning_rate_h = learning_rate_h
+        self.learning_rate_w = learning_rate_w
+
+    @cython.boundscheck(False)
+    @cython.wraparound(False)
+    cdef double majorize_h(
+        self, int row, int col, Mat2D h, Mat2D w, Mat2D v
+        ) noexcept nogil:
+        # return 0.0
+        cdef double s = 0.0
+        if row!=h.shape[0] and col != h.shape[0]:
+            s = s + 2 * h[row+1, col+1]
+        if row!=0 and col!= 0:
+            s = s + 2 * h[row-1, col-1]
+        return self.learning_rate_h * s
+
+    @cython.boundscheck(False)
+    @cython.wraparound(False)
+    cdef double majorize_w(
+        self, int row, int col, Mat2D h, Mat2D w, Mat2D v
+        ) noexcept nogil:
+        return 0.0
+            
+    @cython.boundscheck(False)
+    @cython.wraparound(False)
+    cdef double minorize_h(
+        self, int row, int col, Mat2D h, Mat2D w, Mat2D v
+        ) noexcept nogil:
+        cdef double s = 0.0
+        if row!=h.shape[0] and col != h.shape[0]:
+            s = s + 2 * h[row, col]
+        if row!=0 and col!= 0:
+            s = s + 2 * h[row, col]
+        return self.learning_rate_h * s
+
+
+    @cython.boundscheck(False)
+    @cython.wraparound(False)
+    cdef double minorize_w(
+        self, int row, int col, Mat2D h, Mat2D w, Mat2D v
+        ) noexcept nogil:
+        return 0.0
+
+    @cython.boundscheck(False)
+    @cython.wraparound(False)
+    cdef double compute(self, Mat2D h, Mat2D w, Mat2D v, Mat2D wh) noexcept nogil:
+        cdef double s = 0.0
+        cdef int i, j
+        for i in range(v.shape[0]):
+            for j in range(v.shape[1]):
+                if i!=h.shape[0] and j != h.shape[0]:
+                    s = s + (h[i, j] - h[i+1, j+1])**2
+                if i!=0 and j!= 0:
+                    s = s + (h[i, j] - h[i-1, j-1])**2
+        # h[i, j]^2 - 2 * h[i, j] * h[i+1, j+1] + h[i+1, j+1]^2
+        # derivative: 2 * h[i, j] - 2 * h[i+1, j+1]
+        return s
+
+
 
 cdef class Euclidean2D:
     cdef double learning_rate_h
@@ -111,10 +175,11 @@ cdef class _Loss2D:
         s = 0.0
         for c in self.components:
             if c.__class__ == Euclidean2D:
-                c_ = <Euclidean2D> c
+                s = s + (<Euclidean2D> c).compute(h, w, v, wh)
+            elif c.__class__ == Diagonalize2D:
+                s = s + (<Diagonalize2D> c).compute(h, w, v, wh)
             else:
                 raise ValueError(f"Unsupported loss component {c.__class__}")
-            s = s + c_.compute(h, w, v, wh)
         return s
 
     cdef update(self, Mat2D h, Mat2D w, Mat2D v, bint fix_h, bint fix_w):
@@ -141,13 +206,15 @@ cdef class _Loss2D:
                     minorize = 0.0
                     for c in self.components:
                         if c.__class__ == Euclidean2D:
-                            c_ = <Euclidean2D> c
+                            majorize = majorize + (<Euclidean2D> c).majorize_h(i, j, h_copy, w_copy, v)
+                            minorize = minorize + (<Euclidean2D> c).minorize_h(i, j, h_copy, w_copy, v)
+                        elif c.__class__ == Diagonalize2D:
+                            majorize = majorize + (<Diagonalize2D> c).majorize_h(i, j, h_copy, w_copy, v)
+                            minorize = minorize + (<Diagonalize2D> c).minorize_h(i, j, h_copy, w_copy, v)
                         else:
                             raise ValueError(
                                 f"Unsupported loss component {c.__class__}"
                             )
-                        majorize = majorize + c_.majorize_h(i, j, h_copy, w_copy, v)
-                        minorize = minorize + c_.minorize_h(i, j, h_copy, w_copy, v)
                     if self.update_type == "multiplicative":
                         h[i, j] = h[i, j] * majorize / (minorize + EPS)
                     elif self.update_type == "additive":
@@ -160,13 +227,15 @@ cdef class _Loss2D:
                     minorize = 0.0
                     for c in self.components:
                         if c.__class__ == Euclidean2D:
-                            c_ = <Euclidean2D> c
+                            majorize = majorize + (<Euclidean2D> c).majorize_w(i, j, h_copy, w_copy, v)
+                            minorize = minorize + (<Euclidean2D> c).minorize_w(i, j, h_copy, w_copy, v)
+                        elif c.__class__ == Diagonalize2D:
+                            majorize = majorize + (<Diagonalize2D> c).majorize_w(i, j, h_copy, w_copy, v)
+                            minorize = minorize + (<Diagonalize2D> c).minorize_w(i, j, h_copy, w_copy, v)
                         else:
                             raise ValueError(
                                 f"Unsupported loss component {c.__class__}"
                             )
-                        majorize = majorize + c_.majorize_w(j, i, h_copy, w_copy, v)
-                        minorize = minorize + c_.minorize_w(j, i, h_copy, w_copy, v)
                     if self.update_type == "multiplicative":
                         w[j, i] = w[j, i] * majorize / (minorize + EPS)
                     elif self.update_type == "additive":
