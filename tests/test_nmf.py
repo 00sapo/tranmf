@@ -1,13 +1,15 @@
+import pickle
 import sys
 import unittest
 from pathlib import Path
 
+import cv2
 import numpy as np
 from PIL import Image
 
 THIS_DIR = Path(__file__).parent
 sys.path.append(str(THIS_DIR.parent / "src/"))
-from tranmf.nmf import build_initial_w
+from tranmf.nmf import build_initial_w, run_single_nmf
 
 
 # 1. build_initial_w
@@ -34,6 +36,23 @@ class TestNMF(unittest.TestCase):
             assert np.any(W.array[:, v[0] : v[1]] != 0), "Some glyphs are empty."
             maps[v[0] : v[1]] = True
         assert all(maps), "Some glyphs are missing in the codemap."
+
+    def test_run_single_nmf(self):
+        image_file = THIS_DIR / "data/strip.png"
+        image_strip = Image.open(image_file)
+
+        W = pickle.load(open("W.pkl", "rb"))
+        W = W.select_alphabet("abcdefghjklmnopqrstuvwxyzABCDEFCHIJKLMNOPQRSTUVWXYZ")
+        W, H = run_single_nmf(image_strip, W)
+
+        # show the H matrix
+        cv2.imshow("H", H)
+        # show the W matrix
+        cv2.imshow("W", W.array)
+        # show the reconstructed image
+        cv2.imshow("reconstructed", W.array @ H)
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":
