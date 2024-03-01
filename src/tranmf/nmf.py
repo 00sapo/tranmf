@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Union
 
+import cv2
 import numpy as np
 from PIL import Image
 from tqdm import tqdm
@@ -20,6 +21,19 @@ class W:
 
     #: the list of hex codes and (initial, end) positions
     codemap: dict[str, tuple[int, int]]
+
+    def select_alphabet(self, alphabet: str) -> object:
+        """Select a subset of the W matrix that is limited to the given alphabet."""
+        new_array = []
+        new_codemap = {}
+        index = 0
+        for k in alphabet:
+            v = self.codemap[hex(ord(k))]
+            new_array.append(self.array[:, v[0] : v[1]])
+            new_codemap[k] = (index, index + v[1] - v[0])
+            index += v[1] - v[0]
+
+        return W(np.concatenate(new_array, axis=1), new_codemap)
 
 
 def _force_flatpak_tmpdir_permissions(flatpak_name: str):
@@ -130,3 +144,70 @@ def build_initial_w(font_path: Union[Path, str], height=50):
         # create a numpy array from the images
         w = np.concatenate(w, axis=1)
         return W(w, W_dict)
+
+
+def _setup_array(arr: np.ndarray, height: int) -> np.ndarray:
+    """Resize the array to match the given height, converts to grayscale, and put the array in 0-1."""
+    arr = cv2.cvtColor(arr, cv2.COLOR_BGR2GRAY)
+    ratio = height / arr.shape[0]
+    interp = cv2.INTER_AREA if ratio < 1 else cv2.INTER_CUBIC
+    arr = cv2.resize(arr, (round(arr.shape[1] * ratio), height), interpolation=interp)
+    if arr.dtype in [np.uint8, np.uint16]:
+        arr = arr.astype(np.float64) / 255
+    return arr
+
+
+def run_single_nmf(
+    image_strip: Image.Image, W: W, n_iter=100, height=10
+) -> tuple[W, np.ndarray]:
+    """Run NMF on a single image strip.
+    Args:
+        image_strip (np.ndarray): The image strip to run NMF on.
+        W (W): The W matrix.
+        n_iter (int): Number of iterations.
+    Returns:
+        np.ndarray: The H matrix.
+    """
+    from tranmf._nmf import NMF, Euclidean2D
+
+    # put image in grayscale mode
+    # resize image strip to match W's height
+    # convert to float64 array in 0-1
+    image_strip = _setup_array(np.array(image_strip), height)
+    w = _setup_array(W.array, height)
+    h = np.random.rand(w.shape[1], image_strip.shape[1])  # random H
+
+    print("w shape", w.shape)
+    print("h shape", h.shape)
+    print("image_strip shape", image_strip.shape)
+
+    nmf = NMF(
+        [Euclidean2D(1e-3, 1e-3)],
+        "multiplicative",
+        alternate=lambda x: False,
+        verbose=True,
+    )
+    nmf.fit(
+        w,
+        h,
+        image_strip,
+        n_iter,
+        0.1,  # loss tolerance
+        fix_h=False,
+        fix_w=True,
+    )
+    if nmf.get_loss() < 0.1:
+        return W, h
+    #
+    # nmf.set_alternate(lambda x: True)
+    # nmf.fit(
+    #     w,
+    #     h,
+    #     image_strip,
+    #     n_iter,
+    #     0.1,  # loss tolerance
+    #     fix_h=False,
+    #     fix_w=True,
+    # )
+    W.array = w
+    return W, h
