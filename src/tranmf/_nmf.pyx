@@ -20,6 +20,8 @@ ctypedef np.float64_t DType
 #     np.int16_t
 #     np.int8_t
 
+cdef DType EPS = 1e-32
+
 ctypedef DType[:, :] Mat2D
     # DType[:, :]
     # DType[:, ::1]
@@ -147,7 +149,7 @@ cdef class _Loss2D:
                         majorize = majorize + c_.majorize_h(i, j, h_copy, w_copy, v)
                         minorize = minorize + c_.minorize_h(i, j, h_copy, w_copy, v)
                     if self.update_type == "multiplicative":
-                        h[i, j] = h[i, j] * majorize / minorize
+                        h[i, j] = h[i, j] * majorize / (minorize + EPS)
                     elif self.update_type == "additive":
                         h[i, j] = h[i, j] + majorize - minorize
 
@@ -166,7 +168,7 @@ cdef class _Loss2D:
                         majorize = majorize + c_.majorize_w(j, i, h_copy, w_copy, v)
                         minorize = minorize + c_.minorize_w(j, i, h_copy, w_copy, v)
                     if self.update_type == "multiplicative":
-                        w[j, i] = w[j, i] * majorize / minorize
+                        w[j, i] = w[j, i] * majorize / (minorize + EPS)
                     elif self.update_type == "additive":
                         w[j, i] = w[j, i] + majorize - minorize
 
