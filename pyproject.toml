@@ -44,6 +44,11 @@ pytest = "python -m unittest"
 cythonize = "python setup.py build_ext --inplace"
 test = { composite = ["pytest", "cythonize"] }
 
+[tool.pdm.options]
+add = ["--no-isolation", "--no-self"]
+install = ["--no-self"]
+lock = ["--no-cross-platform"]
+
 [tool.pdm.dev-dependencies]
 dev = [
   "ipdb>=0.13.13",

@@ -23,8 +23,8 @@ class TestNMF(unittest.TestCase):
             alternate=lambda x: False,
             verbose=True,
         )
+        nmf.fit(w, h, v, 5, 0.1, False, True)
         nmf.fit(w, h, v, 3, 0.1, True, False)
-        nmf.fit(w, h, v, 3, 0.1, False, True)
         nmf.set_alternate(lambda x: True)
         nmf.fit(w, h, v, 3, 0.1, False, True)
 

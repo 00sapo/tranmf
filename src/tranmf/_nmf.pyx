@@ -12,22 +12,25 @@ np.import_array()
 
 
 ctypedef np.float64_t DType
-# DType = cy.fused_type(
-#     np.float32_t,
-#     np.float64_t,
-#     np.int32_t,
-#     np.int64_t,
-#     np.int16_t,
-#     np.int8_t,
-# )
-#
+# ctypedef fused DType:
+#     np.float32_t
+#     np.float64_t
+#     np.int32_t
+#     np.int64_t
+#     np.int16_t
+#     np.int8_t
+
+ctypedef DType[:, :] Mat2D
+    # DType[:, :]
+    # DType[:, ::1]
+    # DType[::1, :]
 
 # dot-product of two 1D arrays
 @cython.boundscheck(False)
 @cython.wraparound(False)
 cdef DType dot2d(DType[:] a, DType[:] b) noexcept nogil:
     cdef int i
-    cdef DType s = 0.0
+    cdef DType s = 0
     for i in range(a.shape[0]):
         s = s + a[i] * b[i]
     return s
@@ -44,21 +47,21 @@ cdef class Euclidean2D:
     @cython.boundscheck(False)
     @cython.wraparound(False)
     cdef double majorize_h(
-        self, int row, int col, DType[:, :] h, DType[:, :] w, DType[:, :] v
+        self, int row, int col, Mat2D h, Mat2D w, Mat2D v
         ) noexcept nogil:
         return self.learning_rate_h * dot2d(w[:, row], v[:, col])
 
     @cython.boundscheck(False)
     @cython.wraparound(False)
     cdef double majorize_w(
-        self, int row, int col, DType[:, :] h, DType[:, :] w, DType[:, :] v
+        self, int row, int col, Mat2D h, Mat2D w, Mat2D v
         ) noexcept nogil:
         return self.learning_rate_w * dot2d(v[row, :], h[col, :])
 
     @cython.boundscheck(False)
     @cython.wraparound(False)
     cdef double minorize_h(
-        self, int row, int col, DType[:, :] h, DType[:, :] w, DType[:, :] v
+        self, int row, int col, Mat2D h, Mat2D w, Mat2D v
         ) noexcept nogil:
         cdef double s = 0.0
 
@@ -74,7 +77,7 @@ cdef class Euclidean2D:
     @cython.boundscheck(False)
     @cython.wraparound(False)
     cdef double minorize_w(
-        self, int row, int col, DType[:, :] h, DType[:, :] w, DType[:, :] v
+        self, int row, int col, Mat2D h, Mat2D w, Mat2D v
         ) noexcept nogil:
         # (W H H^T)_ij = \s_k (W_ik \s_f(Hkf H^T_fj)_kj
         cdef double s = 0.0
@@ -85,7 +88,7 @@ cdef class Euclidean2D:
 
     @cython.boundscheck(False)
     @cython.wraparound(False)
-    cdef double compute(self, DType[:, :] h, DType[:, :] w, DType[:, :] v, DType[:, :] wh) noexcept nogil:
+    cdef double compute(self, Mat2D h, Mat2D w, Mat2D v, Mat2D wh) noexcept nogil:
         cdef double s = 0.0
         cdef int i, j
         for i in range(v.shape[0]):
@@ -102,7 +105,7 @@ cdef class _Loss2D:
         self.update_type = update_type
         self.components = components
 
-    cdef double compute(self, DType[:, :] h, DType[:, :] w, DType[:, :] v, DType[:, :] wh):
+    cdef double compute(self, Mat2D h, Mat2D w, Mat2D v, Mat2D wh):
         s = 0.0
         for c in self.components:
             if c.__class__ == Euclidean2D:
@@ -112,7 +115,7 @@ cdef class _Loss2D:
             s = s + c_.compute(h, w, v, wh)
         return s
 
-    cdef update(self, DType[:, :] h, DType[:, :] w, DType[:, :] v, bint fix_h, bint fix_w):
+    cdef update(self, Mat2D h, Mat2D w, Mat2D v, bint fix_h, bint fix_w):
         """Updates h and w in place using the majorization and minorization of each loss-component"""
         if not fix_h:
             h_copy = h.copy()
