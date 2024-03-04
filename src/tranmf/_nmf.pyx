@@ -1,5 +1,5 @@
 # cython: language_level=3
-# distutils: language=c++, cdivision=True, boundscheck=False, wraparound=False, initializedcheck=False, -profile=True
+# distutils: language=c, cdivision=True, boundscheck=False, wraparound=False, initializedcheck=False, -profile=True
 from typing import Callable
 
 cimport cython
@@ -51,11 +51,7 @@ cdef class Diagonalize2D:
         self, int row, int col, Mat2D h, Mat2D w, Mat2D v
         ) noexcept nogil:
         # return 0.0
-        cdef double s = 0.0
-        if row!=h.shape[0] and col != h.shape[0]:
-            s = s + 2 * h[row+1, col+1]
-        if row!=0 and col!= 0:
-            s = s + 2 * h[row-1, col-1]
+        cdef double s = 4 * h[row, col]
         return self.learning_rate_h * s
 
     @cython.boundscheck(False)
@@ -70,11 +66,12 @@ cdef class Diagonalize2D:
     cdef double minorize_h(
         self, int row, int col, Mat2D h, Mat2D w, Mat2D v
         ) noexcept nogil:
-        cdef double s = 0.0
-        if row!=h.shape[0] and col != h.shape[0]:
-            s = s + 2 * h[row, col]
-        if row!=0 and col!= 0:
-            s = s + 2 * h[row, col]
+        cdef double s = 3 * h[row, col] ** 2 + 1
+        cdef int kin, kout
+        for kin in range(-1, 2):
+            for kout in range(-1, 2):
+                if row + kin >= 0 and row + kin < h.shape[0] and col + kout >= 0 and col + kout < h.shape[1] and kin != 0 and kout != 0:
+                    s = s + (h[row + kin, col + kout] - (kin == kout)) ** 2
         return self.learning_rate_h * s
 
 
@@ -88,16 +85,26 @@ cdef class Diagonalize2D:
     @cython.boundscheck(False)
     @cython.wraparound(False)
     cdef double compute(self, Mat2D h, Mat2D w, Mat2D v, Mat2D wh) noexcept nogil:
-        cdef double s = 0.0
-        cdef int i, j
+        cdef double s = 0, sk = 0
+        cdef int i, j, kin, kout
         for i in range(v.shape[0]):
             for j in range(v.shape[1]):
-                if i!=h.shape[0] and j != h.shape[0]:
-                    s = s + (h[i, j] - h[i+1, j+1])**2
-                if i!=0 and j!= 0:
-                    s = s + (h[i, j] - h[i-1, j-1])**2
-        # h[i, j]^2 - 2 * h[i, j] * h[i+1, j+1] + h[i+1, j+1]^2
-        # derivative: 2 * h[i, j] - 2 * h[i+1, j+1]
+                # how much wh[i-1:i+1, j-1:j+1] is diagonal (i.e. equal to the
+                # identity matrix)
+                sk = 0
+                for kin in range(-1, 2):
+                    for kout in range(-1, 2):
+                        if i + kin >= 0 and i + kin < v.shape[0] and j + kout >= 0 and j + kout < v.shape[1]:
+                            sk = sk + (h[i + kin, j + kout] - (kin == kout)) ** 2
+                s = s + sk * h[i, j]
+                # for the derivative in respect to h[i, j], we should only consider when
+                # kin == 0 and kout == 0
+                # d(h[i, j]) = A + B
+                # A = d(h[i,j] * (h[i, j]^2 -2 h[i, j] + 1)) = d(h[i,j]^3 - 2
+                # h[i,j]^2 + h[i,j]) = 3 h[i,j]^2 - 4 h[i,j] + 1
+                # for all the other elements, we should just take the sk value when kin
+                # != 0 or kout != 0
+                        
         return s
 
 
@@ -174,10 +181,10 @@ cdef class _Loss2D:
     cdef double compute(self, Mat2D h, Mat2D w, Mat2D v, Mat2D wh):
         s = 0.0
         for c in self.components:
-            if c.__class__ == Euclidean2D:
-                s = s + (<Euclidean2D> c).compute(h, w, v, wh)
-            elif c.__class__ == Diagonalize2D:
-                s = s + (<Diagonalize2D> c).compute(h, w, v, wh)
+            if c[1].__class__ == Euclidean2D:
+                s = s + c[0] * (<Euclidean2D> c[1]).compute(h, w, v, wh)
+            elif c[1].__class__ == Diagonalize2D:
+                s = s + c[0] * (<Diagonalize2D> c[1]).compute(h, w, v, wh)
             else:
                 raise ValueError(f"Unsupported loss component {c.__class__}")
         return s
@@ -205,12 +212,12 @@ cdef class _Loss2D:
                     majorize = 0.0
                     minorize = 0.0
                     for c in self.components:
-                        if c.__class__ == Euclidean2D:
-                            majorize = majorize + (<Euclidean2D> c).majorize_h(i, j, h_copy, w_copy, v)
-                            minorize = minorize + (<Euclidean2D> c).minorize_h(i, j, h_copy, w_copy, v)
-                        elif c.__class__ == Diagonalize2D:
-                            majorize = majorize + (<Diagonalize2D> c).majorize_h(i, j, h_copy, w_copy, v)
-                            minorize = minorize + (<Diagonalize2D> c).minorize_h(i, j, h_copy, w_copy, v)
+                        if c[1].__class__ == Euclidean2D:
+                            majorize = majorize + c[0] * (<Euclidean2D> c[1]).majorize_h(i, j, h_copy, w_copy, v)
+                            minorize = minorize + c[0] * (<Euclidean2D> c[1]).minorize_h(i, j, h_copy, w_copy, v)
+                        elif c[1].__class__ == Diagonalize2D:
+                            majorize = majorize + c[0] * (<Diagonalize2D> c[1]).majorize_h(i, j, h_copy, w_copy, v)
+                            minorize = minorize + c[0] * (<Diagonalize2D> c[1]).minorize_h(i, j, h_copy, w_copy, v)
                         else:
                             raise ValueError(
                                 f"Unsupported loss component {c.__class__}"

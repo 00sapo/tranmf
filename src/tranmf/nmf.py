@@ -158,7 +158,7 @@ def _setup_array(arr: np.ndarray, height: int) -> np.ndarray:
 
 
 def run_single_nmf(
-    image_strip: Image.Image, W: W, n_iter=100, height=10
+    image_strip: Image.Image, W: W, n_iter=50, height=10
 ) -> tuple[W, np.ndarray]:
     """Run NMF on a single image strip.
     Args:
@@ -182,7 +182,7 @@ def run_single_nmf(
     print("image_strip shape", image_strip.shape)
 
     nmf = NMF(
-        [Euclidean2D(1, 1), Diagonalize2D(1, 1)],
+        [(0.5, Euclidean2D(1, 1)), (0.5, Diagonalize2D(1, 1))],
         "multiplicative",
         alternate=lambda x: False,
         verbose=True,
