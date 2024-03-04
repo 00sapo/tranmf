@@ -8,7 +8,10 @@ from typing import Union
 
 import cv2
 import numpy as np
+import torch
+from joblib import Parallel, delayed
 from PIL import Image
+from torchnmf import nmf
 from tqdm import tqdm
 
 THIS_DIR = Path(__file__).parent
@@ -17,23 +20,49 @@ THIS_DIR = Path(__file__).parent
 @dataclass
 class W:
     #: the W matrix (H x glyphs)
-    array: np.ndarray
+    glyphs: list[np.ndarray]
 
-    #: the list of hex codes and (initial, end) positions
-    codemap: dict[str, tuple[int, int]]
+    #: the list of hex codes and its index position
+    codemap: dict[str, int]
+
+    def get_stacked_w(self):
+        """Create a new W matrix from a list of arrays and a codemap."""
+        assert all(
+            arr.ndim == 2 for arr in self.glyphs
+        ), "Error, glyphs should have only 2 dimensions"
+        max_width = max(arr.shape[1] for arr in self.glyphs)
+        padded_arrays = [
+            np.pad(arr, ((0, 0), (0, max_width - arr.shape[1])), "constant")
+            for arr in self.glyphs
+        ]
+        return np.stack(padded_arrays, axis=1)
+
+    def get_glyph(self, glyph: str) -> np.ndarray:
+        """Get the glyph from the W matrix."""
+        if len(glyph) == 1:
+            try:
+                glyph = hex(ord(glyph))
+            except TypeError:
+                raise ValueError("glyph must be a single character or a hex codepoint.")
+        index = self.codemap[glyph]
+        if index is None:
+            raise ValueError(f"Glyph {glyph} not found in the W matrix.")
+        elif index > len(self.glyphs):
+            raise ValueError(f"Index {index} out of bounds.")
+        return self.glyphs[index]
 
     def select_alphabet(self, alphabet: str) -> object:
         """Select a subset of the W matrix that is limited to the given alphabet."""
-        new_array = []
+        new_arrays = []
         new_codemap = {}
         index = 0
         for k in alphabet:
-            v = self.codemap[hex(ord(k))]
-            new_array.append(self.array[:, v[0] : v[1]])
-            new_codemap[k] = (index, index + v[1] - v[0])
-            index += v[1] - v[0]
+            idx = self.codemap[hex(ord(k))]
+            new_arrays.append(self.glyphs[idx])
+            new_codemap[k] = index
+            index += 1
 
-        return W(np.concatenate(new_array, axis=1), new_codemap)
+        return W(new_arrays, new_codemap)
 
 
 def _force_flatpak_tmpdir_permissions(flatpak_name: str):
@@ -82,31 +111,46 @@ def check_deps():
     return Binaries(inkscape=inkscape, fontforge=fontforge)
 
 
-def build_initial_w(font_path: Union[Path, str], height=50):
-    """Build initial W matrix from font file.
-    It first runs `fontdump` bash script to extract the font file and then
-    builds the matrix from the extracted font file.
+def process_svg_file(file_path, bins, height):
+    try:
+        outfile = file_path.with_suffix(".png")
+        # Use inkscape to convert SVG to PNG
+        subprocess.run(
+            bins.inkscape
+            + [
+                str(file_path.resolve()),
+                "--export-type=png",
+                f"--export-filename={outfile}",
+                "--export-area-drawing",
+                f"--export-height={height}",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        # Open the png file and return the image array and hex code
+        image_array = np.asarray(Image.open(outfile))
+        hex_code = hex(int(file_path.stem.split("-")[1]))
+        return (hex_code, image_array)
+    except Exception as e:
+        print(f"Error converting {file_path}: {e}")
+        return None
 
-    Args:
-        font_path (Path or str): Path to the font file.
-        height (int): Height of W.
-    """
-    W_dict = {}
-    w = []
-    cur_width = 0
 
+def build_initial_w(font_path: Union[Path, str], height=50) -> W:
+    """Build initial W matrix from font file."""
+
+    w_dict: dict[str, int] = {}
+    w_arrays = []
     bins = check_deps()
 
-    # Create temporary directory with a random name
     with tempfile.TemporaryDirectory() as tmpdir:
-        # Use fontforge to convert the font to SVG
         print("Converting font to SVG")
         subprocess.run(
             bins.fontforge
             + [
                 "-lang=ff",
                 "-c",
-                f'Open("{font_path}"); SelectWorthOutputting(); foreach Export("{tmpdir}/%u-%e-%n.svg"); endloop;',  # %u is the hex Unicode point in hex, %e is the same in decimal
+                f'Open("{font_path}"); SelectWorthOutputting(); foreach Export("{tmpdir}/%u-%e-%n.svg"); endloop;',
                 str(font_path.resolve()),
             ],
             stdout=subprocess.DEVNULL,
@@ -115,35 +159,20 @@ def build_initial_w(font_path: Union[Path, str], height=50):
 
         # Get the list of SVG files
         svg_files = list(Path(tmpdir).glob("*.svg"))
-        for file in tqdm(svg_files, "Converting SVG to PNG"):
-            try:
-                outfile = file.with_suffix(".png")
-                # Use inkscape to convert SVG to PNG
-                subprocess.run(
-                    bins.inkscape
-                    + [
-                        str(file.resolve()),
-                        "--export-type=png",
-                        f"--export-filename={outfile}",
-                        "--export-area-drawing",
-                        f"--export-height={height}",
-                    ],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-                # open the png file and append it to W
-                w.append(np.asarray(Image.open(outfile)))
-                # add the hex code to the dictionary
-                hex_ = hex(int(file.stem.split("-")[1]))
-                W_dict[hex_] = cur_width, cur_width + w[-1].shape[1]
-                cur_width += w[-1].shape[1]
-            except Exception as e:
-                print(f"Error converting {file}: {e}")
-                continue
 
-        # create a numpy array from the images
-        w = np.concatenate(w, axis=1)
-        return W(w, W_dict)
+        results = Parallel(n_jobs=1)(
+            delayed(process_svg_file)(file, bins, height) for file in tqdm(svg_files)
+        )
+
+        idx = 0
+        for result in results:
+            if result is not None:
+                hex_code, image_array = result
+                w_arrays.append(image_array)
+                w_dict[hex_code] = idx
+                idx += 1
+
+    return W(w_arrays, w_dict)
 
 
 def _setup_array(arr: np.ndarray, height: int) -> np.ndarray:
@@ -154,12 +183,12 @@ def _setup_array(arr: np.ndarray, height: int) -> np.ndarray:
     arr = cv2.resize(arr, (round(arr.shape[1] * ratio), height), interpolation=interp)
     if arr.dtype in [np.uint8, np.uint16]:
         arr = arr.astype(np.float64) / 255
-    return arr
+    return torch.tensor(arr)
 
 
 def run_single_nmf(
-    image_strip: Image.Image, W: W, n_iter=50, height=10
-) -> tuple[W, np.ndarray]:
+    image_strip: Image.Image, w: W, max_iter=50, height=10
+) -> tuple[nmf.NMF, dict[str, int]]:
     """Run NMF on a single image strip.
     Args:
         image_strip (np.ndarray): The image strip to run NMF on.
@@ -168,46 +197,17 @@ def run_single_nmf(
     Returns:
         np.ndarray: The H matrix.
     """
-    from tranmf._nmf import NMF, Diagonalize2D, Euclidean2D
+    # from tranmf._nmf import NMF, Diagonalize2D, Euclidean2D
 
     # put image in grayscale mode
     # resize image strip to match W's height
     # convert to float64 array in 0-1
     image_strip = _setup_array(np.array(image_strip), height)
-    w = _setup_array(W.array, height)
-    h = np.random.rand(w.shape[1], image_strip.shape[1])  # random H
+    w = W([_setup_array(glyph, height) for glyph in w.glyphs], w.codemap)
 
-    print("w shape", w.shape)
-    print("h shape", h.shape)
-    print("image_strip shape", image_strip.shape)
+    nmf.NMFD(W=w.get_stacked_w(), H=(len(w.glyphs), image_strip.shape[1]))
+    nmf.trainable_w = False
+    nmf.trainable_h = True
+    nmf.fit(image_strip, max_iter=max_iter, beta=1, alpha=0, l1_ratio=0, verbose=True)
 
-    nmf = NMF(
-        [(0.5, Euclidean2D(1, 1)), (0.5, Diagonalize2D(1, 1))],
-        "multiplicative",
-        alternate=lambda x: False,
-        verbose=True,
-    )
-    nmf.fit(
-        w,
-        h,
-        image_strip,
-        n_iter,
-        0.1,  # loss tolerance
-        fix_h=False,
-        fix_w=True,
-    )
-    if nmf.get_loss() < 0.1:
-        return W, h
-    #
-    # nmf.set_alternate(lambda x: True)
-    # nmf.fit(
-    #     w,
-    #     h,
-    #     image_strip,
-    #     n_iter,
-    #     0.1,  # loss tolerance
-    #     fix_h=False,
-    #     fix_w=True,
-    # )
-    W.array = w
-    return W, h
+    return nmf, w.codemap
