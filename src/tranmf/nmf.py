@@ -32,7 +32,12 @@ class W:
         ), "Error, glyphs should have only 2 dimensions"
         max_width = max(arr.shape[1] for arr in self.glyphs)
         padded_arrays = [
-            np.pad(arr, ((0, 0), (0, max_width - arr.shape[1])), "constant")
+            np.pad(
+                arr,
+                ((0, 0), (0, max_width - arr.shape[1])),
+                mode="constant",
+                constant_values=(255,),
+            )
             for arr in self.glyphs
         ]
         return np.stack(padded_arrays, axis=1)
@@ -177,17 +182,18 @@ def build_initial_w(font_path: Union[Path, str], height=50) -> W:
 
 def _setup_array(arr: np.ndarray, height: int) -> np.ndarray:
     """Resize the array to match the given height, converts to grayscale, and put the array in 0-1."""
-    arr = cv2.cvtColor(arr, cv2.COLOR_BGR2GRAY)
+    if arr.ndim == 3:
+        arr = cv2.cvtColor(arr, cv2.COLOR_BGR2GRAY)
     ratio = height / arr.shape[0]
     interp = cv2.INTER_AREA if ratio < 1 else cv2.INTER_CUBIC
     arr = cv2.resize(arr, (round(arr.shape[1] * ratio), height), interpolation=interp)
     if arr.dtype in [np.uint8, np.uint16]:
-        arr = arr.astype(np.float64) / 255
+        arr = arr.astype(np.float32) / 255
     return torch.tensor(arr)
 
 
 def run_single_nmf(
-    image_strip: Image.Image, w: W, max_iter=50, height=10
+    image_strip: np.ndarray, w: W, max_iter=50, height=50
 ) -> tuple[nmf.NMF, dict[str, int]]:
     """Run NMF on a single image strip.
     Args:
@@ -202,12 +208,25 @@ def run_single_nmf(
     # put image in grayscale mode
     # resize image strip to match W's height
     # convert to float64 array in 0-1
-    image_strip = _setup_array(np.array(image_strip), height)
+    image_strip = _setup_array(np.asarray(image_strip), height)
     w = W([_setup_array(glyph, height) for glyph in w.glyphs], w.codemap)
 
-    nmf.NMFD(W=w.get_stacked_w(), H=(len(w.glyphs), image_strip.shape[1]))
-    nmf.trainable_w = False
-    nmf.trainable_h = True
-    nmf.fit(image_strip, max_iter=max_iter, beta=1, alpha=0, l1_ratio=0, verbose=True)
+    w_ = torch.tensor(w.get_stacked_w())
+    print(w_.min(), w_.max())
+    print(image_strip.min(), image_strip.max())
+    l_out = image_strip.shape[1]
+    r = w_.shape[1]
+    t = w_.shape[2]
+    l_in = l_out - t + 1
+    h_ = torch.rand(1, r, l_in)
+    nmfd = nmf.NMFD(W=w_, H=h_, trainable_W=False, trainable_H=True)
+    nmfd.fit(
+        image_strip[None],
+        max_iter=max_iter,
+        beta=1,
+        alpha=1,
+        l1_ratio=0,
+        verbose=True,
+    )
 
-    return nmf, w.codemap
+    return nmfd, w.codemap

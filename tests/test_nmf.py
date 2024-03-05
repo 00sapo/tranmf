@@ -6,6 +6,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 from PIL import Image
+from skimage.filters import threshold_otsu
 
 THIS_DIR = Path(__file__).parent
 sys.path.append(str(THIS_DIR.parent / "src/"))
@@ -30,31 +31,48 @@ class TestNMF(unittest.TestCase):
         Image.fromarray(W.get_glyph("Z")).show()
         Image.fromarray(W.get_glyph("g")).show()
         # show the whole W after reshaping it to a 2D array (third dimension is the glyphs)
-        Image.fromarray(W.glyphs.reshape(-1, W.glyphs.shape[2])).show()
+        Image.fromarray(
+            W.get_stacked_w().reshape(W.shape[0], W.shape[1] * W.shape[2])
+        ).show()
 
-        assert W.glyphs.shape[0] == 50
-        maps = np.zeros(W.glyphs.shape[1], dtype=bool)
+        assert len(W.glyphs) == 50
+        maps = np.zeros(len(W.glyphs), dtype=bool)
         for _, v in W.codemap.items():
-            assert np.any(W.glyphs[:, v[0] : v[1]] != 0), "Some glyphs are empty."
-            maps[v[0] : v[1]] = True
+            assert np.any(W.glyphs[v] != 0), "Some glyphs are empty."
+            maps[v] = True
         assert all(maps), "Some glyphs are missing in the codemap."
 
     def test_run_single_nmf(self):
         image_file = THIS_DIR / "data/strip.png"
-        image_strip = Image.open(image_file)
+        image_strip = Image.open(image_file).convert("L")
+        # th = threshold_otsu(np.array(image_strip))
+        # image_strip = np.array(image_strip) > th
+        # image_strip = image_strip.astype(np.float32)
 
-        W = pickle.load(open("W.pkl", "rb"))
-        W = W.select_alphabet("abcdefghjklmnopqrstuvwxyzABCDEFCHIJKLMNOPQRSTUVWXYZ")
-        W, H = run_single_nmf(image_strip, W)
+        w = pickle.load(open("W.pkl", "rb"))
+        w = w.select_alphabet("abcdefghjklmnopqrstuvwxyzABCDEFCHIJKLMNOPQRSTUVWXYZ")
+        nmfd, codemap = run_single_nmf(image_strip, w)
 
-        print(H.max(), H.min())
+        w = (
+            nmfd.W.reshape(nmfd.W.shape[0], nmfd.W.shape[1] * nmfd.W.shape[2])
+            .detach()
+            .numpy()
+        )
+        h = nmfd.H[0].detach().numpy()
+        wh = nmfd()[0].detach().numpy()
+        print(w.min(), w.max())
+        print(h.min(), h.max())
+        print(wh.min(), wh.max())
 
+        # normalize the h matrix
+        h = (h - h.min()) / (h.max() - h.min())
         # show the H matrix
-        cv2.imshow("H", H)
+        cv2.imshow("H", h)
         # show the W matrix
-        cv2.imshow("W", W.array)
+        cv2.imshow("W", w)
         # show the reconstructed image
-        cv2.imshow("reconstructed", W.array @ H)
+        cv2.imshow("reconstructed", wh)
+        cv2.imshow("original", np.asarray(image_strip))
         cv2.waitKey(0)
         cv2.destroyAllWindows()
 
