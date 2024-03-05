@@ -4,14 +4,15 @@ import tempfile
 from collections import namedtuple
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Union
+from typing import Callable, Union
 
 import cv2
+import jax
+import jax.numpy as jnp
 import numpy as np
-import torch
+import optax
 from joblib import Parallel, delayed
 from PIL import Image
-from torchnmf import nmf
 from tqdm import tqdm
 
 THIS_DIR = Path(__file__).parent
@@ -25,22 +26,9 @@ class W:
     #: the list of hex codes and its index position
     codemap: dict[str, int]
 
-    def get_stacked_w(self):
+    def get_concatenated_w(self):
         """Create a new W matrix from a list of arrays and a codemap."""
-        assert all(
-            arr.ndim == 2 for arr in self.glyphs
-        ), "Error, glyphs should have only 2 dimensions"
-        max_width = max(arr.shape[1] for arr in self.glyphs)
-        padded_arrays = [
-            np.pad(
-                arr,
-                ((0, 0), (0, max_width - arr.shape[1])),
-                mode="constant",
-                constant_values=(255,),
-            )
-            for arr in self.glyphs
-        ]
-        return np.stack(padded_arrays, axis=1)
+        return np.concatenate(self.glyphs, axis=1)
 
     def get_glyph(self, glyph: str) -> np.ndarray:
         """Get the glyph from the W matrix."""
@@ -189,44 +177,120 @@ def _setup_array(arr: np.ndarray, height: int) -> np.ndarray:
     arr = cv2.resize(arr, (round(arr.shape[1] * ratio), height), interpolation=interp)
     if arr.dtype in [np.uint8, np.uint16]:
         arr = arr.astype(np.float32) / 255
-    return torch.tensor(arr)
+    arr = jax.device_put(arr)
+    return arr
+
+
+@jax.jit
+def reconstruct(w, h):
+    w = get_transformed_w(w)
+    h = get_transformed_h(h)
+    return jnp.dot(w, h)
+
+
+@jax.jit
+def get_transformed_w(w_in):
+    w_in = (1 + jax.lax.tanh(w_in)) / 2
+    return w_in
+
+
+@jax.jit
+def get_transformed_h(h_in):
+    # sigmoid entry-wise
+    h_in = jax.nn.sigmoid(h_in)
+    # softmax to columns
+    h_in = jax.nn.softmax(h_in, axis=1)
+    # keep positive
+    h_in = (1 + jax.lax.tanh(h_in)) / 2
+    return h_in
+
+
+@jax.jit
+def nmf_loss(w, h, v):
+    wh = reconstruct(w, h)
+    return optax.l2_loss(wh, v).sum()
+
+
+def get_alternating_gradient(loss_fn, idx, w_shape, h_shape):
+
+    def adjust_gradient(*args, **kwargs):
+        val, grad = jax.value_and_grad(loss_fn, idx)(*args, **kwargs)
+        if idx == (0,):
+            grad = grad[0], jnp.zeros(h_shape)
+        elif idx == (1,):
+            grad = jnp.zeros(w_shape), grad[0]
+        return val, grad
+
+    return adjust_gradient
 
 
 def run_single_nmf(
-    image_strip: np.ndarray, w: W, max_iter=50, height=50
-) -> tuple[nmf.NMF, dict[str, int]]:
+    image_strip: np.ndarray,
+    w: W,
+    max_iter=50,
+    height=50,
+    optimizer=optax.adam,
+    learning_rate=0.1,
+    tol=1e-5,
+    freeze_w=False,
+    freeze_h=False,
+    alternate: Callable[int, bool] = None,
+) -> tuple[np.ndarray, np.ndarray, dict[str, int]]:
     """Run NMF on a single image strip.
     Args:
         image_strip (np.ndarray): The image strip to run NMF on.
         W (W): The W matrix.
-        n_iter (int): Number of iterations.
+        max_iter (int, optional): Maximum number of iterations. Defaults to 50.
+        height (int, optional): The height used for the W and final WH matrix. Defaults to 50.
+        oprtimizer (optax.GradientTransformation, optional): The optimizer to use. Defaults to optax.adam.
+        ... (other args)
+        alternate (Callable[int, bool], optional): A function that returns True if the
+            iteration should alternate between updating W and H. Defaults to None.
     Returns:
+        np.ndarray: The W matrix.
         np.ndarray: The H matrix.
+        dict[str, int]: The codemap.
     """
-    # from tranmf._nmf import NMF, Diagonalize2D, Euclidean2D
+    assert not (freeze_w and freeze_h), "Cannot freeze both W and H."
 
     # put image in grayscale mode
     # resize image strip to match W's height
     # convert to float64 array in 0-1
     image_strip = _setup_array(np.asarray(image_strip), height)
-    w = W([_setup_array(glyph, height) for glyph in w.glyphs], w.codemap)
+    w_ = w.get_concatenated_w()
+    w_ = _setup_array(w_, height)
 
-    w_ = torch.tensor(w.get_stacked_w())
-    print(w_.min(), w_.max())
-    print(image_strip.min(), image_strip.max())
-    l_out = image_strip.shape[1]
-    r = w_.shape[1]
-    t = w_.shape[2]
-    l_in = l_out - t + 1
-    h_ = torch.rand(1, r, l_in)
-    nmfd = nmf.NMFD(W=w_, H=h_, trainable_W=False, trainable_H=True)
-    nmfd.fit(
-        image_strip[None],
-        max_iter=max_iter,
-        beta=1,
-        alpha=1,
-        l1_ratio=0,
-        verbose=True,
-    )
+    # random h
+    key = jax.random.PRNGKey(1997)
+    h = jax.random.uniform(key, (w_.shape[1], image_strip.shape[1]))
 
-    return nmfd, w.codemap
+    optimizer_ = optimizer(learning_rate)
+    opt_state = optimizer_.init((w_, h))
+
+    def get_alternating_gradient_(idx):
+        return get_alternating_gradient(nmf_loss, idx, w_.shape, h.shape)
+
+    for i in range(max_iter):
+        if alternate is not None and alternate(i):
+            freeze_w = not freeze_w
+            freeze_h = not freeze_h
+
+        if freeze_h:
+            nmf_loss_ = get_alternating_gradient_((0,))
+        elif freeze_w:
+            nmf_loss_ = get_alternating_gradient_((1,))
+        else:
+            nmf_loss_ = get_alternating_gradient_((0, 1))
+
+        loss_value, grads = nmf_loss_(w_, h, image_strip)
+        updates, opt_state = optimizer_.update(grads, opt_state)
+        w_, h = optax.apply_updates((w_, h), updates)
+        if loss_value < tol:
+            break
+
+    # TODO: w_ should be used to change the glyphs of w
+    # w_ = w_.reshape(w.glyphs[0].shape[0], w.glyphs[0].shape[1], -1)
+    # w.glyphs = [w_[:, :, i] for i in range(w_.shape[2])]
+    w_ = np.asarray(get_transformed_w(w_))
+    h = np.asarray(get_transformed_h(h))
+    return w_, h, w.codemap

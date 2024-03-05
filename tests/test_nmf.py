@@ -51,25 +51,23 @@ class TestNMF(unittest.TestCase):
 
         w = pickle.load(open("W.pkl", "rb"))
         w = w.select_alphabet("abcdefghjklmnopqrstuvwxyzABCDEFCHIJKLMNOPQRSTUVWXYZ")
-        nmfd, codemap = run_single_nmf(image_strip, w)
-
-        w = (
-            nmfd.W.reshape(nmfd.W.shape[0], nmfd.W.shape[1] * nmfd.W.shape[2])
-            .detach()
-            .numpy()
+        w_, h, codemap = run_single_nmf(
+            image_strip, w, alternate=lambda x: True, freeze_w=True, freeze_h=False
         )
-        h = nmfd.H[0].detach().numpy()
-        wh = nmfd()[0].detach().numpy()
-        print(w.min(), w.max())
+
+        wh = np.dot(w_, h)
+        print(w_.min(), w_.max())
         print(h.min(), h.max())
         print(wh.min(), wh.max())
 
-        # normalize the h matrix
+        # normalize the h and w matrices
         h = (h - h.min()) / (h.max() - h.min())
+        w_ = (w_ - w_.min()) / (w_.max() - w_.min())
+
         # show the H matrix
         cv2.imshow("H", h)
         # show the W matrix
-        cv2.imshow("W", w)
+        cv2.imshow("W", w_)
         # show the reconstructed image
         cv2.imshow("reconstructed", wh)
         cv2.imshow("original", np.asarray(image_strip))
