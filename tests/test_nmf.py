@@ -27,15 +27,16 @@ class TestNMF(unittest.TestCase):
             pickle.load(f)
 
         # show the A, Z and g (hex codepoints 41, 5A and 67)
-        Image.fromarray(W.get_glyph("0x41")).show()
-        Image.fromarray(W.get_glyph("Z")).show()
-        Image.fromarray(W.get_glyph("g")).show()
-        # show the whole W after reshaping it to a 2D array (third dimension is the glyphs)
-        Image.fromarray(
-            W.get_stacked_w().reshape(W.shape[0], W.shape[1] * W.shape[2])
-        ).show()
+        cv2.imshow("A", W.get_glyph("0x41"))
+        cv2.imshow("Z", W.get_glyph("Z"))
+        cv2.imshow("g", W.get_glyph("g"))
+        cv2.imshow("W", W.get_concatenated_w())
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
 
-        assert len(W.glyphs) == 50
+        assert len(W.glyphs) == len(
+            W.codemap
+        ), "The number of glyphs and the codemap do not match."
         maps = np.zeros(len(W.glyphs), dtype=bool)
         for _, v in W.codemap.items():
             assert np.any(W.glyphs[v] != 0), "Some glyphs are empty."

@@ -121,7 +121,7 @@ def process_svg_file(file_path, bins, height):
             stderr=subprocess.DEVNULL,
         )
         # Open the png file and return the image array and hex code
-        image_array = np.asarray(Image.open(outfile))
+        image_array = np.asarray(Image.open(outfile).convert("L"))
         hex_code = hex(int(file_path.stem.split("-")[1]))
         return (hex_code, image_array)
     except Exception as e:
@@ -235,6 +235,7 @@ def run_single_nmf(
     freeze_w=False,
     freeze_h=False,
     alternate: Callable[int, bool] = None,
+    verbose=False,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, int]]:
     """Run NMF on a single image strip.
     Args:
@@ -283,6 +284,8 @@ def run_single_nmf(
             nmf_loss_ = get_alternating_gradient_((0, 1))
 
         loss_value, grads = nmf_loss_(w_, h, image_strip)
+        if verbose:
+            print(f"Loss at iteration {i}: {loss_value}")
         updates, opt_state = optimizer_.update(grads, opt_state)
         w_, h = optax.apply_updates((w_, h), updates)
         if loss_value < tol:
