@@ -4,13 +4,14 @@ import tempfile
 from collections import namedtuple
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Union
+from typing import Callable, Optional, Union
 
 import cv2
 import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
+from jax.scipy.signal import convolve
 from joblib import Parallel, delayed
 from PIL import Image
 from tqdm import tqdm
@@ -26,9 +27,22 @@ class W:
     #: the list of hex codes and its index position
     codemap: dict[str, int]
 
+    def resize(self, height: int):
+        """Resize the glyphs to match the given height."""
+        for i, glyph in enumerate(self.glyphs):
+            self.glyphs[i] = cv2.resize(
+                glyph, (round(glyph.shape[1] * height / glyph.shape[0]), height)
+            )
+
     def get_concatenated_w(self):
         """Create a new W matrix from a list of arrays and a codemap."""
-        return np.concatenate(self.glyphs, axis=1)
+        accumulated_codemap = {}
+        start = 0
+        for k, v in self.codemap.items():
+            accumulated_codemap[k] = start, start + self.glyphs[v].shape[1]
+            start += self.glyphs[v].shape[1]
+
+        return np.concatenate(self.glyphs, axis=1), accumulated_codemap
 
     def get_glyph(self, glyph: str) -> np.ndarray:
         """Get the glyph from the W matrix."""
@@ -181,42 +195,87 @@ def _setup_array(arr: np.ndarray, height: int) -> np.ndarray:
     return arr
 
 
-@jax.jit
-def reconstruct(w, h):
-    w = get_transformed_w(w)
-    h = get_transformed_h(h)
-    return jnp.dot(w, h)
+def build_network(params):
+    assert params["n_conv_layers"] == len(params["activations"])
+
+    # @jax.jit
+    def network(w, h, weights):
+        assert params["n_conv_layers"] == len(weights) - 1
+        # W
+        w = get_transformed_w(w)
+
+        # H
+        for i in range(params["n_conv_layers"]):
+            h = convolve(h, weights[i], mode="same")
+            h = params["activations"][i](h)
+            # h = jax.lax.max_pool(h, (1, kernel_size), (1, kernel_size), "SAME")
+        h = h * weights[-1]
+        h = h.mean(axis=2)
+        h = get_transformed_h(h)
+        return jnp.dot(w, h), w, h
+
+    return network
 
 
-@jax.jit
+# @jax.jit
 def get_transformed_w(w_in):
-    w_in = (1 + jax.lax.tanh(w_in)) / 2
+    # keep positive
+    w_in = jax.nn.relu(w_in)
     return w_in
 
 
-@jax.jit
+# @jax.jit
 def get_transformed_h(h_in):
-    # sigmoid entry-wise
-    h_in = jax.nn.sigmoid(h_in)
-    # softmax to columns
-    h_in = jax.nn.softmax(h_in, axis=1)
+    # one-hot encoding
+    h_in = jax.nn.softmax(h_in, axis=0)
     # keep positive
-    h_in = (1 + jax.lax.tanh(h_in)) / 2
+    h_in = jax.nn.relu(h_in)
     return h_in
 
 
-@jax.jit
-def nmf_loss(w, h, v):
-    wh = reconstruct(w, h)
-    return optax.l2_loss(wh, v).sum()
+# @jax.jit
+def structural_contiguity_loss(h):
+    loss = jnp.zeros_like(h)
+    k = 4
+    for k_ in range(1, k + 1):
+        loss = loss.at[:-k_, :-k_].set(jnp.abs(h[:-k_, :-k_] - h[k_:, k_:]))
+    return loss.sum() / k
 
 
-def get_alternating_gradient(loss_fn, idx, w_shape, h_shape):
+# @jax.jit
+def structural_separation_loss(h):
+    k = 14
+    h = h[:, : int(h.shape[1] / k) * k]
+    h = h.reshape(h.shape[0], k, -1)
+    h = h.sum(axis=2)
+    m = h.size
+    return m - jnp.abs(h[:, :-1] - h[:, 1:]).sum()
 
+
+# @jax.jit
+def l1_loss(wh, v):
+    return jnp.abs(wh - v).sum()
+
+
+# @jax.jit
+def nmf_loss(w, h_weights, v, network):
+    h, weights = h_weights
+    wh, w, h = network(w, h, weights)
+    # loss_h = (jnp.std(h, axis=1)).sum()
+    # loss_h = jnp.sum(jnp.abs(1 - jnp.max(h, axis=0)))
+    return (
+        l1_loss(wh, v)
+        # + loss_h
+        # + structural_contiguity_loss(h)
+        # + structural_separation_loss(h)
+    )
+
+
+def get_alternating_gradient(loss_fn, idx, w_shape, h_shape, weights):
     def adjust_gradient(*args, **kwargs):
         val, grad = jax.value_and_grad(loss_fn, idx)(*args, **kwargs)
         if idx == (0,):
-            grad = grad[0], jnp.zeros(h_shape)
+            grad = grad[0], (jnp.zeros(h_shape), (jnp.zeros(w.shape) for w in weights))
         elif idx == (1,):
             grad = jnp.zeros(w_shape), grad[0]
         return val, grad
@@ -224,9 +283,80 @@ def get_alternating_gradient(loss_fn, idx, w_shape, h_shape):
     return adjust_gradient
 
 
+def init_weights(params):
+    rng_key = jax.random.PRNGKey(1997)
+    weights = [
+        jax.random.normal(rng_key, params["kernel_size"])
+        for _ in range(params["n_conv_layers"])
+    ]
+    weights.append(jnp.ones((1, 1, params["h_channel_size"])))
+    return weights
+
+
+def _iterate(
+    w_,
+    h,
+    image_strip,
+    network,
+    network_params,
+    optimizer,
+    max_iter,
+    alternate,
+    freeze_h,
+    freeze_w,
+    tol,
+    patience,
+    verbose,
+):
+    weights = init_weights(network_params)
+    opt_state = optimizer.init((w_, (h, weights)))
+
+    def get_alternating_gradient_(idx):
+        return get_alternating_gradient(nmf_loss, idx, w_.shape, h.shape, weights)
+
+    best_wh = (w_, h, weights)
+    best_loss = jnp.inf
+    last_improvement_iter = -1
+    for i in range(max_iter):
+        # decide what to freeze
+        if alternate is not None and alternate(i):
+            freeze_w = not freeze_w
+            freeze_h = not freeze_h
+        if freeze_h:
+            nmf_loss_ = get_alternating_gradient_((0,))
+        elif freeze_w:
+            nmf_loss_ = get_alternating_gradient_((1,))
+        else:
+            nmf_loss_ = get_alternating_gradient_((0, 1))
+
+        # compute the loss and gradients
+        loss_value, grads = nmf_loss_(w_, (h, weights), image_strip, network)
+        if verbose:
+            print(f"Loss at iteration {i}: {loss_value}")
+        updates, opt_state = optimizer.update(grads, opt_state)
+        w_, (h, weights) = optax.apply_updates((w_, (h, weights)), updates)
+
+        # early stopping
+        if loss_value < best_loss:
+            best_wh = (w_, h, weights)
+            last_improvement_iter = i
+            if best_loss - loss_value < tol:
+                print("Converged.")
+                break
+            else:
+                best_loss = loss_value
+        else:
+            if i - last_improvement_iter > patience:
+                print("Early stopping.")
+                break
+
+    return best_wh
+
+
 def run_single_nmf(
     image_strip: np.ndarray,
     w: W,
+    *,
     max_iter=50,
     height=50,
     optimizer=optax.adam,
@@ -234,9 +364,23 @@ def run_single_nmf(
     tol=1e-5,
     freeze_w=False,
     freeze_h=False,
-    alternate: Callable[int, bool] = None,
+    alternate: Optional[
+        Callable[
+            [
+                int,
+            ],
+            bool,
+        ]
+    ] = None,
     verbose=False,
-) -> tuple[np.ndarray, np.ndarray, dict[str, int]]:
+    patience=100,
+    network_params={
+        "n_conv_layers": 2,
+        "h_channel_size": 10,
+        "kernel_size": (1, 15, 10),
+        "activations": [jax.nn.relu, jax.nn.relu],
+    },
+) -> tuple[np.ndarray, np.ndarray, dict[str, int], np.ndarray]:
     """Run NMF on a single image strip.
     Args:
         image_strip (np.ndarray): The image strip to run NMF on.
@@ -258,42 +402,39 @@ def run_single_nmf(
     # resize image strip to match W's height
     # convert to float64 array in 0-1
     image_strip = _setup_array(np.asarray(image_strip), height)
-    w_ = w.get_concatenated_w()
+    w.resize(height)
+    w_, codemap = w.get_concatenated_w()
     w_ = _setup_array(w_, height)
 
     # random h
-    key = jax.random.PRNGKey(1997)
-    h = jax.random.uniform(key, (w_.shape[1], image_strip.shape[1]))
-
-    optimizer_ = optimizer(learning_rate)
-    opt_state = optimizer_.init((w_, h))
-
-    def get_alternating_gradient_(idx):
-        return get_alternating_gradient(nmf_loss, idx, w_.shape, h.shape)
-
-    for i in range(max_iter):
-        if alternate is not None and alternate(i):
-            freeze_w = not freeze_w
-            freeze_h = not freeze_h
-
-        if freeze_h:
-            nmf_loss_ = get_alternating_gradient_((0,))
-        elif freeze_w:
-            nmf_loss_ = get_alternating_gradient_((1,))
-        else:
-            nmf_loss_ = get_alternating_gradient_((0, 1))
-
-        loss_value, grads = nmf_loss_(w_, h, image_strip)
-        if verbose:
-            print(f"Loss at iteration {i}: {loss_value}")
-        updates, opt_state = optimizer_.update(grads, opt_state)
-        w_, h = optax.apply_updates((w_, h), updates)
-        if loss_value < tol:
-            break
+    # key = jax.random.PRNGKey(1997)
+    # h = jax.random.uniform(key, (w_.shape[1], image_strip.shape[1]))
+    h = jnp.zeros(
+        (w_.shape[1], image_strip.shape[1], network_params["h_channel_size"]),
+        dtype=jnp.float32,
+    )
+    # but give more a chance to each glyph to start in any position
+    for start, end in codemap.values():
+        h = h.at[start].set(1.0)
+    network = build_network(network_params)
+    best_wh = _iterate(
+        w_,
+        h,
+        image_strip,
+        network,
+        network_params,
+        optimizer(learning_rate),
+        max_iter,
+        alternate,
+        freeze_h,
+        freeze_w,
+        tol,
+        patience,
+        verbose,
+    )
 
     # TODO: w_ should be used to change the glyphs of w
     # w_ = w_.reshape(w.glyphs[0].shape[0], w.glyphs[0].shape[1], -1)
     # w.glyphs = [w_[:, :, i] for i in range(w_.shape[2])]
-    w_ = np.asarray(get_transformed_w(w_))
-    h = np.asarray(get_transformed_h(h))
-    return w_, h, w.codemap
+    wh, w_, h = network(*best_wh)
+    return np.asarray(w_), np.asarray(h), codemap, np.asarray(wh)

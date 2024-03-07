@@ -689,21 +689,6 @@ files = [
 [[package]]
 name = "jax"
 version = "0.4.25"
-extras = ["cuda11"]
-requires_python = ">=3.9"
-summary = "Differentiate, compile, and transform Numpy code."
-groups = ["default"]
-dependencies = [
-    "jax==0.4.25",
-]
-files = [
-    {file = "jax-0.4.25-py3-none-any.whl", hash = "sha256:8158c837e5ecc195074b421609e85329a962785b36f9fe5ff53e844e8ad87dbc"},
-    {file = "jax-0.4.25.tar.gz", hash = "sha256:a8ee189c782de2b7b2ffb64a8916da380b882a617e2769aa429b71d79747b982"},
-]
-
-[[package]]
-name = "jax"
-version = "0.4.25"
 extras = ["cuda12"]
 requires_python = ">=3.9"
 summary = "Differentiate, compile, and transform Numpy code."

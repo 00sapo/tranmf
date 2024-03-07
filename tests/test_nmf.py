@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 import cv2
+import jax
 import numpy as np
 from PIL import Image
 from skimage.filters import threshold_otsu
@@ -46,17 +47,31 @@ class TestNMF(unittest.TestCase):
     def test_run_single_nmf(self):
         image_file = THIS_DIR / "data/strip.png"
         image_strip = Image.open(image_file).convert("L")
-        # th = threshold_otsu(np.array(image_strip))
-        # image_strip = np.array(image_strip) > th
-        # image_strip = image_strip.astype(np.float32)
+        th = threshold_otsu(np.array(image_strip))
+        image_strip = np.array(image_strip) > th
+        image_strip = image_strip.astype(np.float32)
 
         w = pickle.load(open("W.pkl", "rb"))
         w = w.select_alphabet("abcdefghjklmnopqrstuvwxyzABCDEFCHIJKLMNOPQRSTUVWXYZ")
-        w_, h, codemap = run_single_nmf(
-            image_strip, w, alternate=lambda x: True, freeze_w=True, freeze_h=False
+        w_, h, codemap, wh = run_single_nmf(
+            image_strip,
+            w,
+            max_iter=20000,
+            tol=0.0001,
+            # alternate=lambda x: True,
+            patience=100,
+            learning_rate=1e-1,
+            freeze_w=True,
+            freeze_h=False,
+            verbose=True,
+            network_params={
+                "n_conv_layers": 3,
+                "h_channel_size": 20,
+                "kernel_size": (1, 9, 9),
+                "activations": [jax.nn.relu, jax.nn.relu, jax.nn.relu],
+            },
         )
 
-        wh = np.dot(w_, h)
         print(w_.min(), w_.max())
         print(h.min(), h.max())
         print(wh.min(), wh.max())
@@ -67,6 +82,7 @@ class TestNMF(unittest.TestCase):
 
         # show the H matrix
         cv2.imshow("H", h)
+        # cv2.imshow("H_2", (h > 0.5).astype(np.float32))
         # show the W matrix
         cv2.imshow("W", w_)
         # show the reconstructed image
